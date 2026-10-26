@@ -89,6 +89,8 @@ def cmd_move(a) -> int:
     for w in plan.warnings:
         print(f"warning: {w}", file=sys.stderr)
     print(f"will write: {plan.handoff_file}")
+    if dst.session_file:
+        print(f"the file is a {dst.name} session: it is kept, because {dst.name} reads it when you run the command")
     if dst.native and a.no_native:
         print(f"--no-native: no {dst.name} session will be created; you get the handoff file and a launch command")
     elif dst.native:

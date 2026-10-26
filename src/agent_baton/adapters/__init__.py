@@ -2,6 +2,7 @@ from .base import Adapter
 from .claude_code import ClaudeCodeAdapter
 from .codex import CodexAdapter
 from .cursor import CursorAdapter
+from .gemini import GeminiAdapter
 from .kiro import KiroAdapter
 
 ADAPTERS: dict[str, type[Adapter]] = {
@@ -9,6 +10,7 @@ ADAPTERS: dict[str, type[Adapter]] = {
     "claude": ClaudeCodeAdapter,
     "codex": CodexAdapter,
     "cursor": CursorAdapter,
+    "gemini": GeminiAdapter,
 }
 
 

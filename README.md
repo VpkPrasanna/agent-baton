@@ -6,8 +6,9 @@
 
 **Hand one coding-agent session to another assistant when your usage runs out.**
 
-Works between **Kiro CLI, Claude Code, Codex and Cursor CLI**: read from any of them, write into Claude Code or
-Codex as a real session, or into Kiro and Cursor as a handoff file with a launch command.
+Works between **Kiro CLI, Claude Code, Codex, Cursor CLI and Gemini CLI**: read from any of them, write into Claude
+Code or Codex as a real session, into Gemini through its own `--session-file` import, or into Kiro and Cursor as a
+handoff file with a launch command.
 
 You are deep in a Kiro CLI session and your credits run out. `baton` reads that one session, turns it into a
 compact brief (or a size-capped transcript), strips secrets, and creates a new session in Claude Code or Codex
@@ -119,7 +120,7 @@ resume it (run in /Users/me/project):
 
 | Command | Option | Meaning |
 |---|---|---|
-| `list` | `--from {kiro,claude,codex,cursor}` | Source agent (required) |
+| `list` | `--from {kiro,claude,codex,cursor,gemini}` | Source agent (required) |
 | | `--all` | All directories, not just the current one |
 | | `--limit N` | Rows to show (default 20) |
 | | `--no-subagents` | Hide sessions the agent started itself. Kiro tags them, and they are shown and labelled `[subagent]` by default |
@@ -142,6 +143,7 @@ resume it (run in /Users/me/project):
 | **Codex** | A thread created through Codex's own API (`codex app-server --stdio`: `thread/start`, `thread/inject_items`, `thread/name/set`). For `--full` from Claude Code, Codex's own importer brings in the whole session instead (see below). Baton never writes into Codex's files or databases | `codex resume <id>` |
 | **Kiro CLI** | Kiro has no import format, so there is no session id. You get the handoff file in `.baton/` | `kiro-cli chat '<prompt>'` (printed) |
 | **Cursor CLI** | Cursor's chat store is an undocumented graph of content-addressed blobs, which baton does not write into, so there is no session id. You get the handoff file in `.baton/` | `cursor-agent '<prompt>'` (printed) |
+| **Gemini CLI** | A JSON session file in `.baton/`, which Gemini's own `--session-file` flag imports: Gemini then creates a new session in the current project when you run the command. Baton never writes into Gemini's own store. There is no session id until then, and the file is kept because the command reads it | `gemini --session-file <file>` (printed) |
 
 Both `--summarize` and `--full` create a native session in Claude and Codex. With `--summarize` the new session
 contains the brief plus a short acknowledgement. With `--full` it contains the brief plus the most recent messages
@@ -192,9 +194,10 @@ flowchart TB
         direction LR
         K["Kiro CLI<br/>~/.kiro/sessions/cli (JSONL)<br/>SQLite for older sessions"]
         CU["Cursor CLI<br/>~/.cursor/chats (SQLite blob graph)"]
+        GE["Gemini CLI<br/>~/.gemini/tmp (JSONL records)"]
         C["Claude Code<br/>~/.claude/projects (JSONL)"]
         X["Codex<br/>~/.codex/sessions (rollout JSONL)<br/>SQLite history if a rollout was deleted"]
-        K ~~~ C ~~~ X ~~~ CU
+        K ~~~ C ~~~ X ~~~ CU ~~~ GE
     end
     subgraph CORE["baton core"]
         direction LR
@@ -206,7 +209,8 @@ flowchart TB
         TX["Codex<br/>codex app-server --stdio<br/>thread/start, inject_items, name/set<br/>codex resume ID"]
         TK["Kiro CLI<br/>no import format<br/>handoff file + kiro-cli chat"]
         TU["Cursor CLI<br/>no safe import path<br/>handoff file + cursor-agent"]
-        TC ~~~ TX ~~~ TK ~~~ TU
+        TG["Gemini CLI<br/>session file for<br/>gemini --session-file"]
+        TC ~~~ TX ~~~ TK ~~~ TU ~~~ TG
     end
     SRC --> CORE --> DST
 ```
@@ -260,7 +264,8 @@ src/agent_baton/
     claude_code.py  JSONL reader and session writer
     codex.py        rollout + SQLite reader, app-server session writer
     cursor.py       reader for Cursor CLI's blob graph (SQLite + protobuf nodes)
-tests/test_baton.py 57 tests; the real `codex` is blocked in every test
+    gemini.py       reader that replays Gemini's JSONL records; writes the file for --session-file
+tests/test_baton.py 66 tests; the real `codex` and `kiro-cli` are blocked in every test
 ```
 
 ### Adapter interface
@@ -273,6 +278,7 @@ Each agent is one class. To support another, subclass `Adapter` and implement:
 | `load(id)` | yes | Parse exactly one session into the neutral `Session` |
 | `import_sources` and `import_native(info, cwd)` | optional | Bring a whole session in through the agent's own importer. Return `None` when not applicable; raise `NativeError` when tried and failed, so baton falls back to `write_native` and says why |
 | `native = True` and `write_native(session, cwd)` | optional | Create a resumable session and return `Native(session_id, command)`. Raise `NativeError` on failure so baton falls back |
+| `session_file = True`, `handoff_suffix`, `render_session_file(session, cwd)` and `import_command(relpath)` | optional | For an agent that imports a session file through its own flag (Gemini's `--session-file`): baton writes that file instead of the Markdown handoff and prints the import command |
 | `launch_command(prompt)` | optional | Command to start the agent with the handoff prompt |
 
 ## Safety and privacy
@@ -287,15 +293,16 @@ Each agent is one class. To support another, subclass `Adapter` and implement:
 
 ## Supported moves and how well each is tested
 
-Any source can move into any different target, which makes 12 directions. A move works the same way in both modes:
+Any source can move into any different target, which makes 20 directions. A move works the same way in both modes:
 `--summarize` sends the brief, `--full` sends a capped transcript (Claude Code to Codex uses Codex's official importer).
 
-| From ↓ / To → | **Claude Code** | **Codex** | **Kiro CLI** | **Cursor CLI** |
-|---|---|---|---|---|
-| **Kiro CLI** | New session with ID<br>**Live + model** | New thread with ID<br>**Live** | not applicable | Handoff file and `cursor-agent` command<br>**Live** |
-| **Claude Code** | not applicable | New thread with ID<br>**Live + model** for the brief and for `--full` built by baton; **Live** for the official importer | Handoff file and `kiro-cli chat` command<br>**Dry run** | Handoff file and `cursor-agent` command<br>**Tests only** |
-| **Codex** | New session with ID<br>**Dry run** | not applicable | Handoff file and `kiro-cli chat` command<br>**Tests only** | Handoff file and `cursor-agent` command<br>**Tests only** |
-| **Cursor CLI** | New session with ID<br>**Dry run** | New thread with ID<br>**Tests only** | Handoff file and `kiro-cli chat` command<br>**Tests only** | not applicable |
+| From ↓ / To → | **Claude Code** | **Codex** | **Kiro CLI** | **Cursor CLI** | **Gemini CLI** |
+|---|---|---|---|---|---|
+| **Kiro CLI** | New session with ID<br>**Live + model** | New thread with ID<br>**Live** | not applicable | Handoff file and `cursor-agent` command<br>**Live** | Session file and `gemini --session-file` command<br>**Tests only** |
+| **Claude Code** | not applicable | New thread with ID<br>**Live + model** for the brief and for `--full` built by baton; **Live** for the official importer | Handoff file and `kiro-cli chat` command<br>**Dry run** | Handoff file and `cursor-agent` command<br>**Tests only** | Session file and `gemini --session-file` command<br>**Dry run** |
+| **Codex** | New session with ID<br>**Dry run** | not applicable | Handoff file and `kiro-cli chat` command<br>**Tests only** | Handoff file and `cursor-agent` command<br>**Tests only** | Session file and `gemini --session-file` command<br>**Tests only** |
+| **Cursor CLI** | New session with ID<br>**Dry run** | New thread with ID<br>**Tests only** | Handoff file and `kiro-cli chat` command<br>**Tests only** | not applicable | Session file and `gemini --session-file` command<br>**Tests only** |
+| **Gemini CLI** | New session with ID<br>**Tests only** | New thread with ID<br>**Tests only** | Handoff file and `kiro-cli chat` command<br>**Tests only** | Handoff file and `cursor-agent` command<br>**Tests only** | not applicable |
 
 What the labels mean:
 
@@ -304,11 +311,18 @@ What the labels mean:
 - **Dry run:** a real source session was read and the handoff was built with `--dry-run`, so nothing was written to the target.
 - **Tests only:** covered by the unit tests with synthetic sessions and a fake target. The source reader and the target were each also exercised in other directions, but that exact pair was not run.
 
-Reading was checked against real sessions for all four sources: Kiro (its own listing and the files agreed on the same 12
+Reading was checked against real sessions for four sources: Kiro (its own listing and the files agreed on the same 12
 sessions), Claude Code, Codex (rollout files and the SQLite history) and Cursor CLI chats.
 
+Gemini CLI is different, and every direction involving it is labelled **Tests only**: there are no Gemini sessions on the
+machine this was built on, and running one needs you to sign in to Gemini CLI. Instead, Gemini's own session loader was run
+offline, with no login, as ground truth. Baton's reader returns exactly what that loader returns on 10 test files (patches,
+removals, reordering, both kinds of rewind, repeated ids, metadata updates, the older single-file format, blank and garbage
+lines), and the file baton writes for `--session-file` is accepted by the loader. The Claude to Gemini row also had a dry
+run on a real Claude session. A real Gemini session and a real `gemini --session-file` launch have not been run.
+
 Not checked anywhere: whether `kiro-cli` or `cursor-agent` acts well on the handoff once started, because that uses the
-target's own credits. Not supported at all: Gemini CLI, GitHub Copilot, Amazon Quick, and chats made inside the Cursor IDE.
+target's own credits. Not supported at all: GitHub Copilot, Amazon Quick, and chats made inside the Cursor IDE.
 
 ## Status and limitations
 
@@ -324,6 +338,7 @@ What has been verified, and what has not:
 | Claude target | `--full` session resumed with `claude -p --resume` and the model described the task correctly | A `--summarize` session resumed in the Claude app |
 | Codex target | Thread creation; the model answers from the injected brief (`codex exec resume` and the interactive `codex resume <id>` UI); `--full` carries the recent messages; a thread appears in the picker once it has a user turn; fallback when `codex` is missing; baton reads its own threads back | A `--full` thread much larger than the 20,000-character case tested; other Codex versions |
 | Codex official importer | A live `baton move --from claude --to codex --full` on a real Claude session: baton picked only that session, the importer produced a picker-visible thread with 38 turns and the tool calls as markers, and baton removed only its own handoff file. Earlier, the same detect and import calls run by hand behaved the same way. The fallback when `codex` is missing was run live. The importer's own fallbacks are covered by mocked-app-server tests | The importer's fallbacks (session not listed, import failed, timed out) against a real Codex; other Codex versions; unusual folder and history conditions |
+| Gemini CLI | The reader matches Gemini's own session loader on 10 test files, run offline against Gemini CLI 0.65.0; the file baton writes for `--session-file` is accepted by that loader; a dry run of a real Claude session into Gemini | A real Gemini session read from disk; `gemini --session-file` launched and the model answering from the history (needs a login); other Gemini CLI versions |
 
 Known limits:
 
@@ -336,7 +351,8 @@ Known limits:
 - **`--no-native`.** Claude Code's session format is internal to Claude Code and changes between versions, so a session written by baton is unsupported even though it resumed correctly in testing. `--no-native` skips it and gives you only the handoff file and launch command.
 - **Shell edits.** Files changed through shell commands are not detected in the file lists.
 - **Cursor CLI** is read from `~/.cursor/chats` only. Chats made in the Cursor IDE itself are not read. Baton follows the chat's current graph from its root, so messages on abandoned branches are skipped. Some chats record no folder, so they appear only with `--all`, and a move writes to the current folder. As a target, Cursor gets a handoff file and launch command, with no session id.
-- **Not supported:** Gemini CLI, Copilot, Amazon Quick, and the Cursor IDE's own chats.
+- **Gemini CLI** keeps a session only for 30 days by default, so old sessions may already be gone. A project's folder is named by the SHA-256 of its path, so baton can name only the current folder, its parents and any folders the session file records. Other sessions list with no folder and show only with `--all`. When you import into Gemini, Gemini chooses the new session's id, so baton cannot print it. `--session-file` exists in Gemini CLI 0.65.0; older versions may lack it.
+- **Not supported:** Copilot, Amazon Quick, and the Cursor IDE's own chats.
 
 ## Troubleshooting
 
@@ -344,6 +360,7 @@ Known limits:
 |---|---|
 | `no kiro sessions found here (try --all)` | Sessions are matched to the current folder. Add `--all`, or `cd` to the project |
 | A Cursor chat has no folder or title | Cursor did not record them. Use `--all`, and expect the handoff to be written to the current folder |
+| A Gemini session lists no folder | Gemini names a project by a hash of its path and baton could not match it. Use `--all`, or `cd` into the project first so baton can match its hash |
 | `note: N subagent session(s) hidden by --no-subagents` | You asked to hide sessions the agent started itself. Drop the flag to see them |
 | `Kiro lists session … but baton found no readable local copy` | Kiro knows the session but its files are not where baton looks (another store version, or a cloud session). Baton cannot read its content |
 | `'0123…' matches 3 codex sessions` | Time-based ids share prefixes. Use a longer prefix, as shown by `baton list` |

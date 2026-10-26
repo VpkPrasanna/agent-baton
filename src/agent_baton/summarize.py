@@ -18,12 +18,13 @@ FULL_TEXT_CHARS = 4000
 FULL_TOOL_CHARS = 600
 MAX_EDITED, MAX_READ = 25, 15
 
-_PATH_KEYS = ("path", "file_path", "filePath", "filename", "file", "notebook_path")
+_PATH_KEYS = ("path", "file_path", "filePath", "filename", "file", "notebook_path", "absolute_path")
 _PATH_LISTS = ("paths", "operations", "edits")
 _EDIT_TOOLS = {
     "write", "edit", "multiedit", "notebookedit", "apply_patch", "fs_write",
     "str_replace_editor", "str_replace_based_edit_tool", "create", "filechange",  # filechange: Codex SQLite history
     "strreplace", "editnotebook",  # Cursor
+    "write_file", "replace",  # Gemini
 }
 # File names that usually hold secrets: never listed in a handoff.
 _SENSITIVE = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*",
@@ -176,6 +177,8 @@ def _scan_plan(session: Session) -> tuple[list[tuple[str, bool]], str, int | Non
             items = [[t.get("content", ""), t.get("status") == "completed"] for t in a.get("todos", []) if isinstance(t, dict)]
         elif name == "update_plan":
             items = [[t.get("step", ""), t.get("status") == "completed"] for t in a.get("plan", []) if isinstance(t, dict)]
+        elif name == "write_todos":  # Gemini
+            items = [[t.get("description", ""), t.get("status") == "completed"] for t in a.get("todos", []) if isinstance(t, dict)]
     return [(t, d) for t, d in items if t], note, start
 
 

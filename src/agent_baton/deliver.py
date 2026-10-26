@@ -35,7 +35,16 @@ def plan_move(session: Session, target: Adapter, mode: str, cwd: Path, last_n: i
                 "(raise --max-chars to keep more, but large handoffs may overflow the target's context)"
             )
     i = session.info
-    path = cwd / ".baton" / f"{i.agent}-{i.id[:8]}-{mode}.md"
+    path = cwd / ".baton" / f"{i.agent}-{i.id[:8]}-{mode}{target.handoff_suffix}"
+    if target.session_file:
+        # the target imports a session file itself (Gemini's --session-file): write that, not the Markdown
+        msgs, omitted = _session_messages(session, mode, body, max_chars)
+        if mode == "full" and omitted:
+            warnings = [f"session file capped at {max_chars:,} characters: {omitted} earlier messages omitted "
+                        "(raise --max-chars to keep more, but large imports may overflow the target's context)"]
+        content = target.render_session_file(Session(i, msgs), cwd)
+        return Plan(path, content, target.import_command(str(path.relative_to(cwd))), warnings=warnings,
+                    max_chars=max_chars)
     prompt = (
         f"You are continuing a session moved from {i.agent}. Read {path.relative_to(cwd)} first, "
         "check the repo state with git, then continue where it left off."
@@ -56,17 +65,22 @@ def remove_handoff(plan: Plan) -> None:
     plan.notes.append("removed the handoff file: its content is now in the new session (--keep-files to keep it)")
 
 
+def _session_messages(session: Session, mode: str, brief: str, max_chars: int):
+    """What a created session holds: for --full the brief plus the most recent messages, otherwise the brief and an
+    acknowledgement (so the conversation ends on an assistant turn). Returns (messages, number omitted)."""
+    if mode == "full":
+        return native_messages(session, max_chars)
+    return [Message("user", "text", brief), Message(
+        "assistant", "text",
+        f"Handoff received from {session.info.agent}. I have the current task, plan and files above. "
+        "Say \"continue\" to pick up where it left off, or give me new instructions.")], 0
+
+
 def _create_session(plan: Plan, session: Session, target: Adapter, mode: str, cwd: Path):
     """baton's own way in: the brief, plus the most recent messages for --full, as a new native session."""
-    if mode == "full":
-        msgs, omitted = native_messages(session, plan.max_chars)
-        if omitted:
-            plan.notes.append(f"native session holds the brief plus the most recent messages ({omitted} earlier omitted)")
-    else:  # the brief, plus an acknowledgement so the conversation ends on an assistant turn
-        msgs = [Message("user", "text", plan.content), Message(
-            "assistant", "text",
-            f"Handoff received from {session.info.agent}. I have the current task, plan and files above. "
-            "Say \"continue\" to pick up where it left off, or give me new instructions.")]
+    msgs, omitted = _session_messages(session, mode, plan.content, plan.max_chars)
+    if mode == "full" and omitted:
+        plan.notes.append(f"native session holds the brief plus the most recent messages ({omitted} earlier omitted)")
     try:
         return target.write_native(Session(session.info, msgs), cwd)
     except NativeError as e:  # keep the handoff file and launch command, which always work
@@ -100,6 +114,9 @@ def apply_plan(plan: Plan, session: Session, target: Adapter, mode: str, cwd: Pa
                 plan.notes.append(made.note)
             if not keep_files:  # only after the session exists; on failure the file stays as the fallback
                 remove_handoff(plan)
+    elif target.session_file:
+        plan.notes.append(f"{target.name} imports this file with its own --session-file flag and creates the session "
+                          "when you run the command, so the file is kept until then")
     elif mode == "full" and target.native:  # --no-native
         plan.notes.append("--no-native: the transcript is written as a file only, so this is a context replay, not a true resume.")
     elif mode == "full":

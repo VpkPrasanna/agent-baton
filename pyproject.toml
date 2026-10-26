@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "baton-agents"
 version = "0.1.0"
-description = "Move one agentic coding session from one assistant (Kiro, Claude Code, Codex, Cursor CLI) to another when usage runs out."
+description = "Move one agentic coding session from one assistant (Kiro, Claude Code, Codex, Cursor CLI, Gemini CLI) to another when usage runs out."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Prasanna Kumar" }]
-keywords = ["ai", "coding-agents", "claude-code", "codex", "kiro", "cursor", "session", "handoff"]
+keywords = ["ai", "coding-agents", "claude-code", "codex", "kiro", "cursor", "gemini-cli", "session", "handoff"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",

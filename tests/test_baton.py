@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import queue
 import subprocess
 import sqlite3
@@ -9,10 +10,12 @@ from contextlib import closing
 import unittest
 from pathlib import Path
 
-from agent_baton.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter, KiroAdapter
+from agent_baton.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter, GeminiAdapter, KiroAdapter
 import agent_baton.adapters.codex as codex_module
+import agent_baton.adapters.gemini as gemini_module
 import agent_baton.adapters.kiro as kiro_module
 from agent_baton.adapters.base import AmbiguousSession, NativeError
+from agent_baton.adapters.gemini import project_hash, read_session_file
 from agent_baton.codex_rpc import AppServer, CodexRpcError, StdioTransport
 from agent_baton.deliver import apply_plan, plan_move
 from agent_baton.redact import redact
@@ -167,6 +170,93 @@ def cursor_chat(root: Path, chat_id: str, cwd: str = "/proj", name: str = "Fix p
         c.execute("insert into meta values ('0', ?)", (json.dumps(meta).encode().hex(),))
         c.commit()
     return chat
+
+
+# ---- Gemini CLI: fixtures, and Gemini's own session loader used as a ground-truth oracle ----
+
+TS = "2026-10-26T10:00:00.000Z"
+
+
+def gemini_meta(sid="00000000-0000-4000-8000-000000000002", **extra):
+    return {"sessionId": sid, "projectHash": "x", "startTime": TS, "lastUpdated": TS, "kind": "main", **extra}
+
+
+def gm(id, type, content, **extra):
+    return {"id": id, "timestamp": TS, "type": type, "content": content, **extra}
+
+
+def gemini_fixtures(folder: Path) -> dict:
+    """Session files covering every record kind Gemini writes, as {name: path}."""
+    folder.mkdir(parents=True, exist_ok=True)
+    cases = {
+        "basic": [gemini_meta(), gm("u1", "user", "first question"), gm("g1", "gemini", "first answer")],
+        "parts content": [gemini_meta(), gm("u1", "user", [{"text": "part one"}, {"text": "part two"}]), gm("g1", "gemini", "ok")],
+        "tool result patch": [
+            gemini_meta(), gm("u1", "user", "read it"),
+            gm("g1", "gemini", "reading", toolCalls=[{"id": "t1", "name": "read_file", "args": {"absolute_path": "/p/a.py"}, "status": "executing"},
+                                                     {"id": "t2", "name": "write_file", "args": {"file_path": "/p/b.py", "content": "x"}}]),
+            {"$patch": {"id": "g1", "toolCalls": [{"id": "t1", "result": [{"functionResponse": {"id": "t1", "name": "read_file", "response": {"output": "file body"}}}]}]}}],
+        "patch updates remove order": [
+            gemini_meta(), gm("a", "user", "A"), gm("b", "gemini", "B"), gm("c", "user", "C"), gm("d", "gemini", "D"),
+            {"$patch": {"updates": [{"id": "b", "content": "B patched"}, {"id": "zzz", "content": "no such message"}],
+                        "removeIds": ["c"], "orderIds": ["d", "b"]}}],
+        "rewind found": [gemini_meta(), gm("u1", "user", "keep"), gm("g1", "gemini", "keep"), gm("u2", "user", "drop"),
+                         gm("g2", "gemini", "drop"), {"$rewindTo": "u2"}, gm("u3", "user", "after the rewind")],
+        "rewind unknown clears all": [gemini_meta(), gm("u1", "user", "gone"), gm("g1", "gemini", "gone"),
+                                      {"$rewindTo": "does-not-exist"}, gm("u9", "user", "fresh start")],
+        "same id again replaces in place": [gemini_meta(), gm("u1", "user", "v1"), gm("g1", "gemini", "reply"), gm("u1", "user", "v2")],
+        "set metadata and info messages": [gemini_meta(), gm("i1", "info", "Imported session"), gm("u1", "user", "hello"),
+                                           gm("e1", "error", "something failed"), gm("g1", "gemini", "hi", thoughts=[{"subject": "x"}]),
+                                           {"$set": {"summary": "A tidy summary"}}],
+    }
+    paths = {}
+    for name, records in cases.items():
+        path = folder / (name.replace(" ", "-") + ".jsonl")
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        paths[name] = path
+    messy = folder / "blank-and-garbage-lines.jsonl"  # a blank line and a half-written line must not break the replay
+    messy.write_text(json.dumps(gemini_meta()) + "\n\n" + json.dumps(gm("u1", "user", "q")) + "\nnot json at all\n"
+                     + json.dumps(gm("g1", "gemini", "a")) + "\n")
+    paths["blank and garbage lines"] = messy
+    legacy = folder / "legacy.json"
+    legacy.write_text(json.dumps({**gemini_meta(), "messages": [gm("m1", "user", "old format question"), gm("m2", "gemini", "old format answer")]}))
+    paths["legacy json"] = legacy
+    return paths
+
+
+_ORACLE = []
+
+
+def gemini_oracle():
+    """(node, chunk file) when Gemini CLI and Node are installed: Gemini's own loader, run offline, with no login."""
+    if not _ORACLE:
+        import shutil
+        found = None
+        node, gem = shutil.which("node"), shutil.which("gemini")
+        if node and gem:
+            for chunk in sorted(Path(os.path.realpath(gem)).parent.glob("chunk-*.js")):
+                text = chunk.read_text(encoding="utf-8", errors="replace")
+                if "async function loadConversationRecord(" in text and "loadConversationRecord" in text[text.rfind("export {"):]:
+                    found = (node, chunk)
+                    break
+        _ORACLE.append(found)
+    return _ORACLE[0]
+
+
+def run_gemini_loader(paths) -> dict:
+    """{path: {"summary", "messages": [{id, type, content, toolCalls}]} or None} as Gemini's loader reads each file."""
+    node, chunk = gemini_oracle()
+    script = Path(tempfile.mkdtemp()) / "oracle.mjs"
+    script.write_text(
+        "const { loadConversationRecord } = await import('file://' + process.argv[2]);\n"
+        "const out = {};\n"
+        "for (const f of process.argv.slice(3)) {\n"
+        "  const r = await loadConversationRecord(f);\n"
+        "  out[f] = r ? { summary: r.summary, messages: (r.messages || []).map(m => ({ id: m.id, type: m.type, content: m.content, toolCalls: m.toolCalls })) } : null;\n"
+        "}\nconsole.log('ORACLE ' + JSON.stringify(out));\nprocess.exit(0);\n")
+    done = subprocess.run([node, str(script), str(chunk), *map(str, paths)], capture_output=True, text=True, timeout=120)
+    line = next(l for l in done.stdout.splitlines() if l.startswith("ORACLE "))
+    return json.loads(line[len("ORACLE "):])
 
 
 def block_real_kiro(test):
@@ -1141,6 +1231,218 @@ class OutputTests(unittest.TestCase):
         text, omitted = build_transcript(self.session)
         self.assertIn("login", text)
         self.assertEqual(omitted, 0)
+
+
+class GeminiTests(unittest.TestCase):
+    def setUp(self):
+        block_real_codex(self)
+        block_real_kiro(self)
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def _session_for_gemini(self):
+        """A real-looking source session (Claude's), to move into Gemini."""
+        claude_fixture(self.tmp / "c")
+        return ClaudeCodeAdapter(self.tmp / "c").load("aaaa")
+
+    def _needs_oracle(self):
+        if not gemini_oracle():
+            self.skipTest("Gemini CLI and Node are not installed: Gemini's own loader cannot be run")
+
+    # ---- reading: Gemini's replay rules ----
+
+    def test_replay_applies_patches_removals_reordering_and_rewinds(self):
+        paths = gemini_fixtures(self.tmp / "f")
+        def ids(name):
+            return [m["id"] for m in read_session_file(paths[name])[1]]
+        self.assertEqual(ids("patch updates remove order"), ["a", "d", "b"])   # c removed, d and b moved to the end in that order
+        self.assertEqual(read_session_file(paths["patch updates remove order"])[1][2]["content"], "B patched")
+        self.assertEqual(ids("rewind found"), ["u1", "g1", "u3"])               # u2 and everything after it dropped
+        self.assertEqual(ids("rewind unknown clears all"), ["u9"])              # an unknown id clears everything before it
+        self.assertEqual(ids("same id again replaces in place"), ["u1", "g1"])
+        self.assertEqual(read_session_file(paths["same id again replaces in place"])[1][0]["content"], "v2")
+        meta, _ = read_session_file(paths["set metadata and info messages"])
+        self.assertEqual(meta["summary"], "A tidy summary")
+        self.assertEqual(len(read_session_file(paths["blank and garbage lines"])[1]), 2)
+        self.assertEqual(ids("legacy json"), ["m1", "m2"])
+        calls = read_session_file(paths["tool result patch"])[1][1]["toolCalls"]
+        self.assertIn("result", calls[0])
+        self.assertNotIn("result", calls[1])  # only the call named in the patch got a result
+
+    def test_replay_matches_geminis_own_loader_on_every_fixture(self):
+        self._needs_oracle()
+        paths = gemini_fixtures(self.tmp / "f")
+        oracle = run_gemini_loader(list(paths.values()))
+        for name, path in paths.items():
+            theirs = oracle[str(path)]
+            self.assertIsNotNone(theirs, name)
+            ours = read_session_file(path)[1]
+            self.assertEqual([(m["id"], m["type"], m["content"]) for m in ours],
+                             [(m["id"], m["type"], m["content"]) for m in theirs["messages"]], name)
+            self.assertEqual([[t.get("result") for t in (m.get("toolCalls") or [])] for m in ours],
+                             [[t.get("result") for t in (m.get("toolCalls") or [])] for m in theirs["messages"]], name)
+        self.assertEqual(read_session_file(paths["set metadata and info messages"])[0]["summary"],
+                         oracle[str(paths["set metadata and info messages"])]["summary"])
+
+    def test_list_and_load_sessions(self):
+        root = self.tmp / "gemini-tmp"
+        proj, other = self.tmp / "project", self.tmp / "other-project"
+        proj.mkdir(); other.mkdir()
+        here = project_hash(os.path.realpath(proj))
+        def put(folder, name, records, mtime):
+            d = root / folder / "chats"
+            d.mkdir(parents=True, exist_ok=True)
+            f = d / name
+            f.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+            os.utime(f, (mtime, mtime))
+        put(here, "session-100-aaaa1111.jsonl", [
+            gemini_meta("aaaa1111-0000-4000-8000-000000000001", projectHash=here),
+            gm("u1", "user", "fix the parser"),
+            gm("g1", "gemini", "reading it", toolCalls=[{"id": "t1", "name": "read_file", "args": {"absolute_path": "/p/a.py"}}]),
+            {"$patch": {"id": "g1", "toolCalls": [{"id": "t1", "result": [{"functionResponse": {"response": {"output": "file body"}}}]}]}},
+            gm("i1", "info", "not part of the conversation"),
+            gm("u2", "user", [{"text": "now"}, {"text": "fix the tests"}]),
+            gm("g2", "gemini", "done"),
+            {"$set": {"summary": "Fix the parser"}}], 1_790_000_300)
+        put("by-directories", "session-200-bbbb2222.jsonl", [
+            gemini_meta("bbbb2222-0000-4000-8000-000000000002", projectHash=project_hash(other), directories=[str(other)]),
+            gm("u1", "user", "a question in another project")], 1_790_000_200)
+        put("unknown-project", "session-300-cccc3333.jsonl", [
+            gemini_meta("cccc3333-0000-4000-8000-000000000003", projectHash="f" * 64),
+            gm("u1", "user", "a question nobody can place")], 1_790_000_100)
+        put(here, "abcd.jsonl", [gemini_meta("dddd4444-0000-4000-8000-000000000004"), gm("u1", "user", "a subagent's own chat")], 1_790_000_050)
+        (root / here / "chats" / "session-400-eeee5555.json").write_text(json.dumps(
+            {**gemini_meta("eeee5555-0000-4000-8000-000000000005", projectHash=here), "messages": [gm("m1", "user", "older single-file format")]}))
+        os.utime(root / here / "chats" / "session-400-eeee5555.json", (1_790_000_000, 1_790_000_000))
+        from unittest import mock
+        with mock.patch.object(gemini_module.os, "getcwd", return_value=str(proj)):
+            a = GeminiAdapter(root)
+            listed = a.list_sessions()
+        self.assertEqual([s.id[:4] for s in listed], ["aaaa", "bbbb", "cccc", "eeee"])  # newest first; the subagent file is not a session
+        by = {s.id[:4]: s for s in listed}
+        self.assertEqual(by["aaaa"].title, "Fix the parser")                          # the saved summary wins
+        self.assertEqual(by["eeee"].title, "older single-file format")                # otherwise the first user message
+        self.assertEqual(by["aaaa"].cwd, os.path.realpath(proj))                      # found by hashing the current folder
+        self.assertEqual(by["bbbb"].cwd, str(other))                                  # found through the recorded directories
+        self.assertEqual(by["cccc"].cwd, "")                                          # no way to name this project
+        self.assertTrue(by["aaaa"].source_path.endswith("session-100-aaaa1111.jsonl"))
+        s = a.load("aaaa")
+        self.assertEqual([(m.role, m.kind) for m in s.messages], [
+            ("user", "text"), ("assistant", "text"), ("assistant", "tool_call"), ("tool", "tool_result"),
+            ("user", "text"), ("assistant", "text")])                                 # the info message is dropped
+        self.assertEqual(s.messages[3].text, "file body")                             # functionResponse output
+        self.assertEqual(s.messages[2].meta["args"], {"absolute_path": "/p/a.py"})
+        self.assertEqual(s.messages[4].text, "now\nfix the tests")                    # parts joined into one text
+        from agent_baton.summarize import files_touched
+        self.assertEqual(files_touched(s).read, ["/p/a.py"])                          # Gemini's absolute_path key
+
+    # ---- writing: a session file for `gemini --session-file` ----
+
+    def test_target_writes_a_session_file_and_prints_the_import_command(self):
+        session = self._session_for_gemini()
+        target = GeminiAdapter(self.tmp / "g")
+        cwd = self.tmp / "work"
+        cwd.mkdir()
+        plan = plan_move(session, target, "summarize", cwd)
+        self.assertEqual(plan.handoff_file, cwd / ".baton" / "claude-aaaa1111-summarize.gemini.json")
+        self.assertEqual(plan.command, "gemini --session-file .baton/claude-aaaa1111-summarize.gemini.json")
+        apply_plan(plan, session, target, "summarize", cwd)
+        self.assertEqual((plan.native, plan.session_id, plan.handoff_removed), (False, None, False))  # no id until Gemini imports it
+        self.assertTrue(plan.handoff_file.exists())                                   # kept: the command reads it later
+        self.assertEqual(plan.handoff_file.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(any("--session-file" in n for n in plan.notes))
+        rec = json.loads(plan.handoff_file.read_text())
+        self.assertEqual(rec["projectHash"], project_hash(os.path.realpath(cwd)))
+        self.assertRegex(rec["sessionId"], r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+        self.assertTrue(rec["summary"].startswith("Moved from claude: "))
+        self.assertEqual([m["type"] for m in rec["messages"]], ["user", "gemini"])    # the brief, then an acknowledgement
+        self.assertIn("Session handoff (summary)", rec["messages"][0]["content"])
+        self.assertIn("Handoff received", rec["messages"][1]["content"])
+
+    def test_target_file_in_full_mode_and_redaction(self):
+        from agent_baton.model import Message, Session
+        msgs = [Message("user" if i % 2 == 0 else "assistant", "text", f"turn-{i} " + "pad " * 200) for i in range(120)]
+        msgs.append(Message("assistant", "text", "the key is AKIAABCDEFGHIJKLMNOP"))
+        session = Session(self._session_for_gemini().info, msgs)
+        target = GeminiAdapter(self.tmp / "g")
+        cwd = self.tmp / "work"
+        cwd.mkdir()
+        plan = plan_move(session, target, "full", cwd, max_chars=20_000)
+        self.assertTrue(any("session file capped" in w and "earlier messages omitted" in w for w in plan.warnings))
+        rec = json.loads(plan.content)
+        types = [m["type"] for m in rec["messages"]]
+        self.assertEqual(types[0], "user")
+        self.assertTrue(all(a != b for a, b in zip(types, types[1:])))               # strictly alternating
+        self.assertIn("Session handoff (summary)", rec["messages"][0]["content"])     # the brief first, then the recent tail
+        text = plan.content
+        self.assertIn("turn-119", text)
+        self.assertNotIn("turn-1 ", text)
+        self.assertNotIn("AKIAABCDEFGHIJKLMNOP", text)                                # redacted before it is written
+        self.assertLess(len(text), 40_000)
+
+    def test_session_file_is_accepted_by_geminis_own_loader(self):
+        self._needs_oracle()
+        session = self._session_for_gemini()
+        target = GeminiAdapter(self.tmp / "g")
+        cwd = self.tmp / "work"
+        cwd.mkdir()
+        for mode in ("summarize", "full"):
+            plan = plan_move(session, target, mode, cwd)
+            apply_plan(plan, session, target, mode, cwd)
+            theirs = run_gemini_loader([plan.handoff_file])[str(plan.handoff_file)]
+            self.assertIsNotNone(theirs, mode)
+            ours = json.loads(plan.content)
+            self.assertEqual([(m["type"], m["content"]) for m in theirs["messages"]],
+                             [(m["type"], m["content"]) for m in ours["messages"]], mode)
+            self.assertEqual(theirs["summary"], ours["summary"], mode)
+            types = [m["type"] for m in theirs["messages"]]
+            self.assertEqual(types[:2], ["user", "gemini"], mode)                       # what --session-file keeps: user and gemini turns
+            self.assertTrue(all(a != b for a, b in zip(types, types[1:])), mode)
+
+    def test_cli_moves_into_gemini_and_keeps_the_file(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+        from agent_baton import cli
+        claude_fixture(self.tmp / "c2")
+        src = ClaudeCodeAdapter(self.tmp / "c2")
+        work = self.tmp / "work2"
+        work.mkdir()
+        info = src.list_sessions()[0]
+        info.cwd = str(work)
+        target = GeminiAdapter(self.tmp / "g")
+        for extra in ([], ["--no-native"], ["--full"]):
+            out = io.StringIO()
+            with mock.patch.object(cli.adapters, "get", side_effect=lambda n, *_, **__: src if n == "claude" else target), \
+                    mock.patch.object(src, "resolve", return_value=info), redirect_stdout(out):
+                cli.main(["move", "--from", "claude", "--to", "gemini", "--session", "aaaa", "-y", *extra])
+            text = out.getvalue()
+            self.assertIn("no session id yet: gemini creates one when you start it", text, extra)
+            self.assertIn("gemini --session-file .baton/claude-aaaa1111-", text, extra)
+            self.assertIn("is kept, because gemini reads it", text, extra)
+            self.assertNotIn("will also create", text, extra)
+        self.assertEqual(len(list((work / ".baton").glob("*.gemini.json"))), 2)       # summarize and full; --no-native reused the first
+
+    def test_gemini_is_registered_and_listed_by_the_cli(self):
+        from agent_baton import adapters
+        self.assertIn("gemini", adapters.ADAPTERS)
+        a = GeminiAdapter(self.tmp / "none")
+        self.assertEqual((a.native, a.session_file, a.import_sources), (False, True, frozenset()))
+        self.assertEqual(a.list_sessions(), [])                                       # no Gemini folder at all is fine
+
+    def test_gemini_tool_names_in_the_brief(self):
+        from agent_baton.model import Message, Session, SessionInfo
+        from agent_baton.summarize import extract_plan, files_touched
+        def call(name, args):
+            return Message("assistant", "tool_call", name, {"name": name, "args": args})
+        s = Session(SessionInfo("gemini", "g1", "/proj", "t", 0), [
+            call("write_todos", {"todos": [{"description": "wire it", "status": "completed"}, {"description": "test it", "status": "pending"}]}),
+            call("write_file", {"file_path": "/proj/new.py", "content": "x"}),
+            call("replace", {"file_path": "/proj/old.py", "old_string": "a", "new_string": "b"}),
+            call("read_file", {"absolute_path": "/proj/readme.md"})])
+        use = files_touched(s)
+        self.assertEqual(sorted(use.edited), ["new.py", "old.py"])
+        self.assertEqual(use.read, ["readme.md"])
+        self.assertEqual(extract_plan(s)[0], [("wire it", True), ("test it", False)])
 
 
 if __name__ == "__main__":

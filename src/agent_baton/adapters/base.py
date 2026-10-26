@@ -29,6 +29,8 @@ class Adapter:
     cli = ""  # command used to launch this agent with an initial prompt
     native = False  # True if write_native can create a resumable session in this agent
     import_sources: frozenset = frozenset()  # source agents whose sessions this agent can import officially
+    session_file = False  # True if the agent imports a session file through its own flag (Gemini's --session-file)
+    handoff_suffix = ".md"  # extension of the file baton writes for this target
 
     def list_sessions(self) -> list[SessionInfo]:
         """Cheap metadata only: never parse full transcripts here."""
@@ -59,6 +61,14 @@ class Adapter:
         the importer was tried and did not produce a session, so the caller can fall back and say why.
         """
         return None
+
+    def render_session_file(self, session: Session, cwd: Path) -> str:
+        """The text of the session file this agent imports (only when `session_file` is True)."""
+        raise NotImplementedError
+
+    def import_command(self, relpath: str) -> str:
+        """The command that imports that file, run from the project folder."""
+        raise NotImplementedError
 
     def write_native(self, session: Session, cwd: Path) -> Native:
         """Create a resumable session in this agent (only when `native` is True). Raises NativeError."""
