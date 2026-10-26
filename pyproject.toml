@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-baton"
+version = "0.1.0"
+description = "Move one agentic coding session from one assistant (Kiro, Claude Code, Codex, Cursor CLI) to another when usage runs out."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Prasanna Kumar" }]
+keywords = ["ai", "coding-agents", "claude-code", "codex", "kiro", "cursor", "session", "handoff"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development",
+]
+dependencies = []
+
+[project.scripts]
+baton = "agent_baton.cli:main"
+agent-baton = "agent_baton.cli:main"  # lets `uvx agent-baton ...` run without --from
+
+[tool.setuptools.packages.find]
+where = ["src"]
