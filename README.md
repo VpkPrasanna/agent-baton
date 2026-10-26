@@ -39,23 +39,23 @@ Requires Python 3.10 or newer (tested on 3.10 through 3.14, on macOS). Moving *i
 ### With uv (recommended)
 
 ```bash
-uv tool install agent-baton     # installs the `baton` command
+uv tool install baton-agents     # installs the `baton` command
 baton --help
 
-uv tool upgrade agent-baton     # later, to update
+uv tool upgrade baton-agents     # later, to update
 ```
 
 Or run it without installing anything:
 
 ```bash
-uvx agent-baton --help
-uvx agent-baton move --from kiro --to claude
+uvx baton-agents --help
+uvx baton-agents move --from kiro --to claude
 ```
 
 ### With pip
 
 ```bash
-pip install agent-baton
+pip install baton-agents
 baton --help
 ```
 
@@ -68,9 +68,10 @@ uv tool install .               # or: python3 -m venv .venv && source .venv/bin/
 
 To run straight from a checkout without installing: `PYTHONPATH=src python3 -m agent_baton.cli --help`.
 
-The package is named `agent-baton` on PyPI because `baton` and `baton-cli` were taken, and its Python import
-package is `agent_baton`, so it cannot clash with any other project's `baton` module. The command is `baton`
-(also available as `agent-baton`).
+The package is named `baton-agents` on PyPI because `baton`, `baton-cli` and `agent-baton` were unavailable (PyPI
+refuses names that match an existing project once hyphens and underscores are ignored). Its Python import package is
+`agent_baton`, so it cannot clash with any other project's `baton` module. The command is `baton`, also available as
+`baton-agents`. The source repository is still called `agent-baton`.
 
 ## Usage
 
@@ -354,7 +355,7 @@ Known limits:
 
 ## Releasing (maintainers)
 
-`uv` installs from PyPI, so publishing to PyPI is what makes `uv tool install agent-baton` and `uvx agent-baton` work.
+`uv` installs from PyPI, so publishing to PyPI is what makes `uv tool install baton-agents` and `uvx baton-agents` work.
 You need a PyPI account and an API token (create one at pypi.org under Account settings, API tokens).
 
 ```bash
