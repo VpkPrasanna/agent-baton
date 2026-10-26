@@ -1,0 +1,22 @@
+# baton's own handoff files: they hold conversation text, so never commit them
+.baton/
+
+# Claude Code project settings and session data for this folder
+.claude/
+
+# Virtual environments
+.venv/
+venv/
+
+# Build output
+dist/
+build/
+*.egg-info/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# macOS
+.DS_Store
