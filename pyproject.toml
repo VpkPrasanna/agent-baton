@@ -27,6 +27,11 @@ classifiers = [
 ]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/VpkPrasanna/agent-baton"
+Repository = "https://github.com/VpkPrasanna/agent-baton"
+Issues = "https://github.com/VpkPrasanna/agent-baton/issues"
+
 [project.scripts]
 baton = "agent_baton.cli:main"
 agent-baton = "agent_baton.cli:main"  # lets `uvx agent-baton ...` run without --from

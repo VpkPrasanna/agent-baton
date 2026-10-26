@@ -1,6 +1,6 @@
 # baton
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/VpkPrasanna/agent-baton/blob/main/LICENSE)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
 
@@ -178,6 +178,10 @@ Answers you gave to Claude's multiple-choice prompts (`AskUserQuestion`) are kep
 often carry the real decision. Interrupted-turn placeholders such as "Tool uses were interrupted" are dropped.
 
 ## Architecture
+
+![baton architecture: read one session, baton core, write a new session](https://raw.githubusercontent.com/VpkPrasanna/agent-baton/main/docs/architecture.png)
+
+The same flow, drawn from the Mermaid source below. GitHub renders that source; places that cannot, such as PyPI, show the image above.
 
 ### Components
 
@@ -383,4 +387,4 @@ in your Codex.
 
 ## License
 
-[MIT](LICENSE) © 2026 Prasanna Kumar
+[MIT](https://github.com/VpkPrasanna/agent-baton/blob/main/LICENSE) © 2026 Prasanna Kumar
