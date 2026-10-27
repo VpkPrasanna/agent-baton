@@ -302,7 +302,7 @@ Any source can move into any different target, which makes 20 directions. A move
 | **Claude Code** | not applicable | New thread with ID<br>**Live + model** for the brief and for `--full` built by baton; **Live** for the official importer | Handoff file and `kiro-cli chat` command<br>**Dry run** | Handoff file and `cursor-agent` command<br>**Tests only** | Session file and `gemini --session-file` command<br>**Dry run** |
 | **Codex** | New session with ID<br>**Dry run** | not applicable | Handoff file and `kiro-cli chat` command<br>**Tests only** | Handoff file and `cursor-agent` command<br>**Tests only** | Session file and `gemini --session-file` command<br>**Tests only** |
 | **Cursor CLI** | New session with ID<br>**Dry run** | New thread with ID<br>**Tests only** | Handoff file and `kiro-cli chat` command<br>**Tests only** | not applicable | Session file and `gemini --session-file` command<br>**Tests only** |
-| **Gemini CLI** | New session with ID<br>**Tests only** | New thread with ID<br>**Tests only** | Handoff file and `kiro-cli chat` command<br>**Tests only** | Handoff file and `cursor-agent` command<br>**Tests only** | not applicable |
+| **Gemini CLI** | New session with ID<br>**Dry run** | New thread with ID<br>**Dry run** | Handoff file and `kiro-cli chat` command<br>**Dry run** | Handoff file and `cursor-agent` command<br>**Tests only** | not applicable |
 
 What the labels mean:
 
@@ -314,12 +314,26 @@ What the labels mean:
 Reading was checked against real sessions for four sources: Kiro (its own listing and the files agreed on the same 12
 sessions), Claude Code, Codex (rollout files and the SQLite history) and Cursor CLI chats.
 
-Gemini CLI is different, and every direction involving it is labelled **Tests only**: there are no Gemini sessions on the
-machine this was built on, and running one needs you to sign in to Gemini CLI. Instead, Gemini's own session loader was run
-offline, with no login, as ground truth. Baton's reader returns exactly what that loader returns on 10 test files (patches,
-removals, reordering, both kinds of rewind, repeated ids, metadata updates, the older single-file format, blank and garbage
-lines), and the file baton writes for `--session-file` is accepted by the loader. The Claude to Gemini row also had a dry
-run on a real Claude session. A real Gemini session and a real `gemini --session-file` launch have not been run.
+Gemini CLI was added last, so it is less tested than the rest. A real Gemini session now exists on the machine this was
+built on (a single `hello` message, with no reply), and against it:
+
+- baton's reader returns exactly what Gemini's own session loader returns for that real file, and for 10 more test files
+  (patches, removals, reordering, both kinds of rewind, repeated ids, metadata updates, the older single-file format,
+  blank and garbage lines). Gemini's loader was run offline, with no login, as ground truth;
+- baton resolves the session's project folder from Gemini's `.project_root` file, and skips the `<session_context>`
+  block that Gemini injects as the first user message, so the title and the brief's current task are what you typed;
+- moves out of that session were dry-run to Claude Code, Codex and Kiro, which is what the **Dry run** labels in the Gemini
+  row mean. Gemini to Cursor is **Tests only**;
+- moves into Gemini: a made-up session with a fake AWS key was written by baton and run through the real
+  `gemini --session-file`. Gemini imported it as a native session, with its "Imported session from …" note and both of
+  baton's messages intact, loaded as history before the next prompt, and the fake key had been redacted before the file was
+  written. The test session was then deleted with Gemini's own `--delete-session`. The Claude to Gemini cell is labelled
+  **Dry run** because that live import used a made-up session, not a real Claude one.
+
+What is still unproven for Gemini: that its model answers from the imported history. In that test Gemini appended the
+question to the history and then never replied, and the one real session on the machine also has no reply, so completing
+a model call did not work on that machine for reasons unrelated to baton. Reading a real session that has replies and tool
+calls is also unproven, because the only real session has none.
 
 Not checked anywhere: whether `kiro-cli` or `cursor-agent` acts well on the handoff once started, because that uses the
 target's own credits. Not supported at all: GitHub Copilot, Amazon Quick, and chats made inside the Cursor IDE.
@@ -338,7 +352,7 @@ What has been verified, and what has not:
 | Claude target | `--full` session resumed with `claude -p --resume` and the model described the task correctly | A `--summarize` session resumed in the Claude app |
 | Codex target | Thread creation; the model answers from the injected brief (`codex exec resume` and the interactive `codex resume <id>` UI); `--full` carries the recent messages; a thread appears in the picker once it has a user turn; fallback when `codex` is missing; baton reads its own threads back | A `--full` thread much larger than the 20,000-character case tested; other Codex versions |
 | Codex official importer | A live `baton move --from claude --to codex --full` on a real Claude session: baton picked only that session, the importer produced a picker-visible thread with 38 turns and the tool calls as markers, and baton removed only its own handoff file. Earlier, the same detect and import calls run by hand behaved the same way. The fallback when `codex` is missing was run live. The importer's own fallbacks are covered by mocked-app-server tests | The importer's fallbacks (session not listed, import failed, timed out) against a real Codex; other Codex versions; unusual folder and history conditions |
-| Gemini CLI | The reader matches Gemini's own session loader on 10 test files, run offline against Gemini CLI 0.65.0; the file baton writes for `--session-file` is accepted by that loader; a dry run of a real Claude session into Gemini | A real Gemini session read from disk; `gemini --session-file` launched and the model answering from the history (needs a login); other Gemini CLI versions |
+| Gemini CLI | The reader matches Gemini's own loader on a real session and on 10 test files (Gemini CLI 0.65.0); project folder from `.project_root`; injected `<session_context>` skipped; the file baton writes was imported by the real `gemini --session-file` into a native session with the messages intact | The model answering from the imported history; a real session with replies and tool calls; other Gemini CLI versions |
 
 Known limits:
 
@@ -351,7 +365,7 @@ Known limits:
 - **`--no-native`.** Claude Code's session format is internal to Claude Code and changes between versions, so a session written by baton is unsupported even though it resumed correctly in testing. `--no-native` skips it and gives you only the handoff file and launch command.
 - **Shell edits.** Files changed through shell commands are not detected in the file lists.
 - **Cursor CLI** is read from `~/.cursor/chats` only. Chats made in the Cursor IDE itself are not read. Baton follows the chat's current graph from its root, so messages on abandoned branches are skipped. Some chats record no folder, so they appear only with `--all`, and a move writes to the current folder. As a target, Cursor gets a handoff file and launch command, with no session id.
-- **Gemini CLI** keeps a session only for 30 days by default, so old sessions may already be gone. A project's folder is named by the SHA-256 of its path, so baton can name only the current folder, its parents and any folders the session file records. Other sessions list with no folder and show only with `--all`. When you import into Gemini, Gemini chooses the new session's id, so baton cannot print it. `--session-file` exists in Gemini CLI 0.65.0; older versions may lack it.
+- **Gemini CLI** keeps a session only for 30 days by default, so old sessions may already be gone. Gemini 0.65.0 keeps each project in a folder named after the project and records its path in a `.project_root` file, which baton reads; older versions named the folder by a hash of the path, so for those baton can only name the current folder, its parents and folders the session file records, and other sessions list with no folder and show only with `--all`. Gemini adds its own `<session_context>` block as the first user message of every session, and baton leaves it out. When you import into Gemini, Gemini chooses the new session's id, so baton cannot print it. `--session-file` exists in Gemini CLI 0.65.0; older versions may lack it.
 - **Not supported:** Copilot, Amazon Quick, and the Cursor IDE's own chats.
 
 ## Troubleshooting
@@ -360,7 +374,8 @@ Known limits:
 |---|---|
 | `no kiro sessions found here (try --all)` | Sessions are matched to the current folder. Add `--all`, or `cd` to the project |
 | A Cursor chat has no folder or title | Cursor did not record them. Use `--all`, and expect the handoff to be written to the current folder |
-| A Gemini session lists no folder | Gemini names a project by a hash of its path and baton could not match it. Use `--all`, or `cd` into the project first so baton can match its hash |
+| A Gemini session lists no folder | An older Gemini version named the project folder by a hash and baton could not match it. Use `--all`, or `cd` into the project first |
+| `gemini --session-file` starts but never answers | Gemini's own model call is not completing (check that it is signed in and its API key reaches the shell you run it from). Baton's import step does not depend on that |
 | `note: N subagent session(s) hidden by --no-subagents` | You asked to hide sessions the agent started itself. Drop the flag to see them |
 | `Kiro lists session … but baton found no readable local copy` | Kiro knows the session but its files are not where baton looks (another store version, or a cloud session). Baton cannot read its content |
 | `'0123…' matches 3 codex sessions` | Time-based ids share prefixes. Use a longer prefix, as shown by `baton list` |

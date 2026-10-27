@@ -167,7 +167,8 @@ class GeminiAdapter(Adapter):
     """Reads Gemini CLI sessions, and imports a handoff through Gemini's own --session-file flag.
 
     Sessions live in ~/.gemini/tmp/<project>/chats/session-<time>-<id>.jsonl, one record per line (older
-    versions wrote one JSON file). As a target, baton writes a JSON session file and prints
+    versions wrote one JSON file). <project> is the project folder's name (older versions used a hash of
+    its path), and each project folder holds a .project_root file naming the folder. As a target, baton writes a JSON session file and prints
     `gemini --session-file <file>`: Gemini then creates a new session from it itself, so baton never writes
     into Gemini's own store.
     """
@@ -193,7 +194,14 @@ class GeminiAdapter(Adapter):
             self._known = {project_hash(p): str(p) for p in (here, *here.parents)}
         return self._known
 
-    def _cwd_for(self, meta: dict) -> str:
+    def _cwd_for(self, meta: dict, session_file: Path | None = None) -> str:
+        if session_file is not None:  # Gemini records each project's folder in <project>/.project_root
+            try:
+                root = (session_file.parent.parent / ".project_root").read_text(encoding="utf-8").strip()
+            except OSError:
+                root = ""
+            if root:
+                return root
         for d in meta.get("directories") or []:  # recorded workspace folders, trusted only if they match the hash
             if isinstance(d, str) and project_hash(d) == meta.get("projectHash"):
                 return d
@@ -211,7 +219,7 @@ class GeminiAdapter(Adapter):
             first = next((m.text for m in to_messages(raw) if m.role == "user"), "")
             sid = meta.get("sessionId") or p.stem.rsplit("-", 1)[-1]
             title = short(str(meta.get("summary") or first), 80)
-            out.append(SessionInfo(self.name, sid, self._cwd_for(meta), title, p.stat().st_mtime, str(p)))
+            out.append(SessionInfo(self.name, sid, self._cwd_for(meta, p), title, p.stat().st_mtime, str(p)))
         return sorted(out, key=lambda s: s.updated, reverse=True)
 
     # ---- loading one session ----

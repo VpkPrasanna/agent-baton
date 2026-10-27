@@ -205,6 +205,12 @@ def gemini_fixtures(folder: Path) -> dict:
         "rewind unknown clears all": [gemini_meta(), gm("u1", "user", "gone"), gm("g1", "gemini", "gone"),
                                       {"$rewindTo": "does-not-exist"}, gm("u9", "user", "fresh start")],
         "same id again replaces in place": [gemini_meta(), gm("u1", "user", "v1"), gm("g1", "gemini", "reply"), gm("u1", "user", "v2")],
+        "shaped like a real 0.65.0 session": [
+            {"kind": "main", "lastUpdated": TS, "projectHash": "x", "sessionId": "00000000-0000-4000-8000-0000000000aa", "startTime": TS},
+            gm("c1", "user", [{"text": "<session_context>\nThis is the Gemini CLI. We are setting up the context for our chat.\n</session_context>"}]),
+            {"$set": {"lastUpdated": TS}},
+            gm("c2", "user", [{"text": "hello"}]),
+            {"$set": {"lastUpdated": TS}}],
         "set metadata and info messages": [gemini_meta(), gm("i1", "info", "Imported session"), gm("u1", "user", "hello"),
                                            gm("e1", "error", "something failed"), gm("g1", "gemini", "hi", thoughts=[{"subject": "x"}]),
                                            {"$set": {"summary": "A tidy summary"}}],
@@ -1267,6 +1273,29 @@ class GeminiTests(unittest.TestCase):
         calls = read_session_file(paths["tool result patch"])[1][1]["toolCalls"]
         self.assertIn("result", calls[0])
         self.assertNotIn("result", calls[1])  # only the call named in the patch got a result
+
+    def test_real_session_shape_title_folder_and_injected_context(self):
+        """A session as Gemini 0.65.0 really writes it: a named project folder with .project_root, an injected
+        <session_context> first message, and the user's own text second."""
+        root = self.tmp / "gemini-tmp"
+        project = self.tmp / "my-project"
+        project.mkdir()
+        chats = root / "my-project" / "chats"                                           # the project's name, not a hash
+        chats.mkdir(parents=True)
+        (root / "my-project" / ".project_root").write_text(str(project) + "\n")
+        paths = gemini_fixtures(self.tmp / "f")
+        (chats / "session-2026-10-27T16-42-00c7375b.jsonl").write_text(paths["shaped like a real 0.65.0 session"].read_text())
+        a = GeminiAdapter(root)
+        (info,) = a.list_sessions()                                                     # run from a different folder: no hash match
+        self.assertEqual(info.cwd, str(project))                                        # from .project_root
+        self.assertEqual(info.title, "hello")                                           # not the injected context
+        self.assertEqual(info.id, "00000000-0000-4000-8000-0000000000aa")
+        s = a.load("0000")
+        self.assertEqual([(m.role, m.text) for m in s.messages], [("user", "hello")])   # the injected block is not conversation
+        from agent_baton.summarize import build_brief
+        brief = build_brief(s)
+        self.assertIn("## Current task (latest user request)\nhello", brief)
+        self.assertNotIn("session_context", brief)
 
     def test_replay_matches_geminis_own_loader_on_every_fixture(self):
         self._needs_oracle()

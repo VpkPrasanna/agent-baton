@@ -10,6 +10,7 @@ INJECTED_PREFIXES = (
     "<command-",
     "<local-command",
     "# AGENTS.md",
+    "<session_context>",  # Gemini CLI puts its environment summary in the first user message
     "Caveat:",
 )
 
