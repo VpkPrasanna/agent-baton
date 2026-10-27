@@ -1474,5 +1474,19 @@ class GeminiTests(unittest.TestCase):
         self.assertEqual(extract_plan(s)[0], [("wire it", True), ("test it", False)])
 
 
+class ReleaseTests(unittest.TestCase):
+    def test_the_version_is_the_same_everywhere(self):
+        import re
+        import agent_baton
+        from agent_baton.codex_rpc import CLIENT_INFO
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        if not pyproject.exists():
+            self.skipTest("pyproject.toml is not next to the tests (running from an installed package)")
+        declared = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(), re.M).group(1)
+        self.assertEqual(agent_baton.__version__, declared)
+        self.assertEqual(CLIENT_INFO["version"], declared)
+        self.assertRegex(declared, r"^\d+\.\d+\.\d+$")
+
+
 if __name__ == "__main__":
     unittest.main()

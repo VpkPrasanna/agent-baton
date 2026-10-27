@@ -7,7 +7,9 @@ import subprocess
 import threading
 import time
 
-CLIENT_INFO = {"name": "baton", "title": "baton", "version": "0.1.0"}
+from . import __version__
+
+CLIENT_INFO = {"name": "baton", "title": "baton", "version": __version__}
 
 
 class CodexRpcError(Exception):

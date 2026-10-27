@@ -340,7 +340,7 @@ target's own credits. Not supported at all: GitHub Copilot, Amazon Quick, and ch
 
 ## Status and limitations
 
-Baton is early software (0.1.0). The session formats it reads and writes are not documented by their vendors and can
+Baton is early software (version 0.x). The session formats it reads and writes are not documented by their vendors and can
 change between releases. Adapters skip records they do not recognise. It was exercised against Kiro CLI 2.28.0, Cursor CLI 2026.10.01,
 Codex 0.164.0 and a current Claude Code.
 
