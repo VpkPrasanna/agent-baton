@@ -3,7 +3,7 @@
 All notable changes to baton. Versions follow semantic versioning: while the version is 0.x, a minor bump (0.2.0)
 adds features and a patch bump (0.2.1) fixes bugs.
 
-## Unreleased
+## 0.2.1 - 2026-10-28
 
 ### Added
 - `--latest` on `move`: take the newest session in this directory (or in any directory with `--all`) without the picker.
