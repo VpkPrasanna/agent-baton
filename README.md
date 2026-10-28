@@ -100,6 +100,9 @@ baton move --from claude --to codex --session 5d8e7b10 --full
 # Pick interactively from this directory's sessions
 baton move --from codex --to claude
 
+# Skip the picker: take this directory's newest session (add --all to look in every directory)
+baton move --from claude --to gemini --latest
+
 # See exactly what would be written, without writing anything
 baton move --from kiro --to codex --session 3f9a1c20 --dry-run
 ```
@@ -124,16 +127,21 @@ resume it (run in /Users/me/project):
 | | `--all` | All directories, not just the current one |
 | | `--limit N` | Rows to show (default 20) |
 | | `--no-subagents` | Hide sessions the agent started itself. Kiro tags them, and they are shown and labelled `[subagent]` by default |
+| | `--no-kiro-cli` | Do not ask `kiro-cli` for its session list (2 to 4 seconds): read Kiro's files only. Same as setting `BATON_NO_KIRO_CLI=1` |
 | `move` | `--from`, `--to` | Source and target agent (required, must differ) |
 | | `--session ID` | Session id or unique prefix. Omit to pick interactively |
+| | `--latest` | Use the newest session in this directory (with `--all`, in any directory) without asking. Cannot be combined with `--session` |
 | | `--summarize` / `--full` | Compact brief (default) / capped transcript |
 | | `--last-n N` | Messages kept verbatim in the brief (default 8) |
 | | `--max-chars N` | Size cap for `--full` (default 200,000, about 50k tokens) |
-| | `--all`, `--no-subagents` | Same as `list`, for the picker and source |
+| | `--all`, `--no-subagents`, `--no-kiro-cli` | Same as `list`, for the picker and source |
 | | `--dry-run` | Print the handoff, write nothing |
 | | `--keep-files` | Keep the handoff file even after a session was created |
 | | `--no-native` | Do not create a session in the target: only write the handoff file and print the launch command. Use it for a target whose session format you would rather not have baton write |
 | | `-y`, `--yes` | Skip the confirmation prompt |
+| (any) | `--version` | Print the baton version |
+
+Handoff files are named `<agent>-<id>-<mode>`, and a repeat move gets `-2`, `-3`, … instead of overwriting the earlier file.
 
 ## What you get in each target
 
@@ -265,7 +273,7 @@ src/agent_baton/
     codex.py        rollout + SQLite reader, app-server session writer
     cursor.py       reader for Cursor CLI's blob graph (SQLite + protobuf nodes)
     gemini.py       reader that replays Gemini's JSONL records; writes the file for --session-file
-tests/test_baton.py 66 tests; the real `codex` and `kiro-cli` are blocked in every test
+tests/test_baton.py 82 tests; the real `codex` and `kiro-cli` are blocked in every test
 ```
 
 ### Adapter interface
@@ -288,6 +296,7 @@ Each agent is one class. To support another, subclass `Adapter` and implement:
 - **Redaction.** Everything baton writes or sends is scrubbed on a best-effort basis: AWS keys, GitHub, OpenAI and Slack tokens, bearer tokens, private keys, and `api_key`/`token`/`password`/`secret` assignments. Short values after password-like keys are redacted even when they are plain words; code such as `password=settings.db_password` is left alone. Review the output before you share it, because redaction cannot catch everything.
 - **Secret-looking files** (`.env`, `*.pem`, `*.key`, `id_rsa*`, `credentials*`, …) are never listed.
 - **Private files.** Handoff files and Claude session files are created with mode 600.
+- **Git warning.** When a handoff file is kept inside a git repository that does not ignore `.baton/`, baton warns you and shows how to ignore it (`echo '.baton/' >> .git/info/exclude`), because the file holds conversation text. Baton never edits your `.gitignore` itself.
 - **Codex goes through its API.** Baton never edits Codex's rollout files or SQLite databases.
 - **What leaves your machine.** Baton itself makes no network calls. The new session's content goes wherever that agent sends it once you use it.
 

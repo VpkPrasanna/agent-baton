@@ -1449,7 +1449,7 @@ class GeminiTests(unittest.TestCase):
             self.assertIn("gemini --session-file .baton/claude-aaaa1111-", text, extra)
             self.assertIn("is kept, because gemini reads it", text, extra)
             self.assertNotIn("will also create", text, extra)
-        self.assertEqual(len(list((work / ".baton").glob("*.gemini.json"))), 2)       # summarize and full; --no-native reused the first
+        self.assertEqual(len(list((work / ".baton").glob("*.gemini.json"))), 3)       # one per move: a repeat never overwrites
 
     def test_gemini_is_registered_and_listed_by_the_cli(self):
         from agent_baton import adapters
@@ -1472,6 +1472,229 @@ class GeminiTests(unittest.TestCase):
         self.assertEqual(sorted(use.edited), ["new.py", "old.py"])
         self.assertEqual(use.read, ["readme.md"])
         self.assertEqual(extract_plan(s)[0], [("wire it", True), ("test it", False)])
+
+
+class QuickWinTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def _git(self, *args, cwd=None):
+        return subprocess.run(["git", *args], cwd=cwd or self.tmp, capture_output=True, text=True)
+
+    def _repo(self, name="repo") -> Path:
+        import shutil
+        if not shutil.which("git"):
+            self.skipTest("git is not installed")
+        repo = self.tmp / name
+        repo.mkdir()
+        self._git("init", "-q", cwd=repo)
+        return repo
+
+    def _main(self, argv, **env):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest import mock
+        from agent_baton import cli
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, env), redirect_stdout(out), redirect_stderr(err):
+            try:
+                code = cli.main(argv)
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    # ---- injected context ----
+
+    def test_injected_blocks_are_recognised_by_shape(self):
+        from agent_baton.model import is_injected
+        for text in ("<external_codex_apps_open_page>\nurl\n</external_codex_apps_open_page>",
+                     "<recommended_plugins>a</recommended_plugins>\n<plugin_hint x=\"1\">b</plugin_hint>",
+                     "<session_context>\nThis is Gemini\n</session_context>",
+                     "<environment_context>x"):
+            self.assertTrue(is_injected(text), text)
+
+    def test_what_a_person_typed_is_not_injected(self):
+        from agent_baton.model import is_injected
+        for text in ("<div>hello</div>", "is x < y or x > y?", "fix this <item_list>a</item_list> please",
+                     "<unclosed_tag> keep going", "plain words"):
+            self.assertFalse(is_injected(text), text)
+
+    def test_codex_title_skips_a_snake_case_context_block(self):
+        write_jsonl(self.tmp / "2026/10/22" / "rollout-z-eeee5555.jsonl", [
+            {"type": "session_meta", "payload": {"id": "eeee5555", "cwd": "/proj"}},
+            {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "<recommended_plugins>x</recommended_plugins>"}]}},
+            {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "port the parser"}]}},
+        ])
+        a = CodexAdapter(self.tmp)
+        self.assertEqual(a.list_sessions()[0].title, "port the parser")
+        self.assertEqual([m.text for m in a.load("eeee").messages], ["port the parser"])
+
+    # ---- launch prompt ----
+
+    def _plan(self, cwd: Path):
+        claude_fixture(self.tmp / "c")
+        session = ClaudeCodeAdapter(self.tmp / "c").load("aaaa")
+        return plan_move(session, KiroAdapter(self.tmp / "none.sqlite3", self.tmp / "none"), "summarize", cwd)
+
+    def test_launch_prompt_mentions_git_only_in_a_repository(self):
+        import shutil
+        if not shutil.which("git"):
+            self.skipTest("git is not installed")
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        self.assertNotIn("with git", self._plan(plain).command)
+        self.assertIn("not a git repository", self._plan(plain).command)
+        repo = self._repo()
+        self.assertIn("check the repo state with git", self._plan(repo).command)
+
+    # ---- unique file names ----
+
+    def test_unique_path_never_reuses_a_name(self):
+        from agent_baton.deliver import unique_path
+        first = self.tmp / "claude-aaaa1111-summarize.md"
+        self.assertEqual(unique_path(first), first)
+        first.write_text("one")
+        second = unique_path(first)
+        self.assertEqual(second.name, "claude-aaaa1111-summarize-2.md")
+        second.write_text("two")
+        self.assertEqual(unique_path(first).name, "claude-aaaa1111-summarize-3.md")
+        self.assertEqual(first.read_text(), "one")
+        g = self.tmp / "x-full.gemini.json"
+        g.write_text("{}")
+        self.assertEqual(unique_path(g).name, "x-full-2.gemini.json")
+
+    def test_a_repeat_move_writes_a_new_file_and_keeps_the_first(self):
+        work = self.tmp / "work"
+        work.mkdir()
+        claude_fixture(self.tmp / "c")
+        session = ClaudeCodeAdapter(self.tmp / "c").load("aaaa")
+        target = KiroAdapter(self.tmp / "none.sqlite3", self.tmp / "none")
+        first = plan_move(session, target, "summarize", work)
+        apply_plan(first, session, target, "summarize", work, False, False)
+        second = plan_move(session, target, "summarize", work)
+        self.assertNotEqual(first.handoff_file, second.handoff_file)
+        self.assertIn(second.handoff_file.name, second.command)
+        self.assertTrue(first.handoff_file.exists())
+
+    # ---- git warning ----
+
+    def test_handoff_not_ignored_tells_the_three_cases_apart(self):
+        from agent_baton.deliver import handoff_not_ignored
+        from unittest import mock
+        repo = self._repo()
+        handoff = repo / ".baton" / "x.md"
+        self.assertTrue(handoff_not_ignored(handoff))
+        (repo / ".gitignore").write_text(".baton/\n")
+        self.assertFalse(handoff_not_ignored(handoff))
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        self.assertFalse(handoff_not_ignored(plain / ".baton" / "x.md"))
+        with mock.patch("agent_baton.deliver.subprocess.run", side_effect=FileNotFoundError):
+            self.assertFalse(handoff_not_ignored(handoff))
+
+    def _move(self, work: Path, to: str, *extra):
+        from unittest import mock
+        from agent_baton import cli
+        claude_fixture(self.tmp / "c")
+        src = ClaudeCodeAdapter(self.tmp / "c")
+        info = src.list_sessions()[0]
+        info.cwd = str(work)
+        dst = {"kiro": KiroAdapter(self.tmp / "none.sqlite3", self.tmp / "none"),
+               "codex": CodexAdapter(self.tmp / "cx")}[to]
+        with mock.patch.object(cli.adapters, "get", side_effect=lambda n, *_, **__: src if n == "claude" else dst), \
+                mock.patch.object(src, "resolve", return_value=info):
+            return self._main(["move", "--from", "claude", "--to", to, "--session", "aaaa", "--dry-run", *extra])
+
+    def test_cli_warns_when_a_kept_handoff_could_be_committed(self):
+        repo = self._repo()
+        _, out, err = self._move(repo, "kiro")
+        self.assertIn(".baton/ is inside a git repository and is not ignored", err)
+        (repo / ".gitignore").write_text(".baton/\n")
+        _, out, err = self._move(repo, "kiro")
+        self.assertNotIn("not ignored", err)
+
+    def test_cli_does_not_warn_outside_a_repository_or_for_a_removed_file(self):
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        self.assertNotIn("not ignored", self._move(plain, "kiro")[2])
+        repo = self._repo("repo2")
+        self.assertNotIn("not ignored", self._move(repo, "codex")[2])      # codex: the file is removed after the move
+        self.assertIn("not ignored", self._move(repo, "codex", "--keep-files")[2])
+
+    # ---- --version, --latest, --no-kiro-cli ----
+
+    def test_version_flag_prints_the_package_version(self):
+        import agent_baton
+        code, out, err = self._main(["--version"])
+        self.assertEqual(code, 0)
+        self.assertEqual((out + err).strip(), f"baton {agent_baton.__version__}")
+
+    def _two_sessions(self):
+        root = self.tmp / "cl"
+        claude_fixture(root, "aaaa1111-0000")
+        claude_fixture(root, "bbbb1111-0000")
+        src = ClaudeCodeAdapter(root)
+        infos = src.list_sessions()
+        for n, i in enumerate(infos):
+            i.cwd = str(self.tmp)
+            i.updated = 100 + n
+        infos.sort(key=lambda i: i.updated, reverse=True)  # adapters list newest first
+        return src, infos, infos[0]
+
+    def test_latest_picks_the_newest_session_without_asking(self):
+        from unittest import mock
+        from agent_baton import cli
+        src, infos, newest = self._two_sessions()
+        dst = KiroAdapter(self.tmp / "none.sqlite3", self.tmp / "none")
+        with mock.patch.object(cli.adapters, "get", side_effect=lambda n, *_, **__: src if n == "claude" else dst), \
+                mock.patch.object(src, "list_sessions", return_value=infos), \
+                mock.patch.object(src, "load", side_effect=src.load) as load, \
+                mock.patch("builtins.input", side_effect=AssertionError("must not ask")), \
+                mock.patch.object(cli.Path, "cwd", return_value=self.tmp):
+            code, out, _ = self._main(["move", "--from", "claude", "--to", "kiro", "--latest", "--dry-run"])
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"using the latest claude session: {newest.id[:12]}", out)
+        load.assert_called_once_with(newest.id)
+
+    def test_latest_conflicts_with_session_and_needs_a_session(self):
+        from unittest import mock
+        from agent_baton import cli
+        code, _, err = self._main(["move", "--from", "claude", "--to", "kiro", "--latest", "--session", "aaaa"])
+        self.assertEqual(code, 2)
+        self.assertIn("not allowed with", err)
+        empty = ClaudeCodeAdapter(self.tmp / "empty")
+        with mock.patch.object(cli.adapters, "get", return_value=empty):
+            code, _, _ = self._main(["move", "--from", "claude", "--to", "kiro", "--latest"])
+        self.assertIn("no claude sessions found", str(code))
+
+    def test_no_kiro_cli_flag_and_variable_skip_the_slow_listing(self):
+        from unittest import mock
+        from agent_baton import adapters, cli
+        seen = []
+        with mock.patch.object(cli.adapters, "get", side_effect=lambda n, **kw: seen.append(kw) or ClaudeCodeAdapter(self.tmp / "none")):
+            self._main(["list", "--from", "kiro"])
+            self._main(["list", "--from", "kiro", "--no-kiro-cli"])
+            self._main(["list", "--from", "kiro"], BATON_NO_KIRO_CLI="1")
+            self._main(["list", "--from", "kiro"], BATON_NO_KIRO_CLI="0")
+        self.assertEqual([kw["use_kiro_cli"] for kw in seen], [True, False, False, True])
+        self.assertIsNone(adapters.get("kiro", use_kiro_cli=False)._runner)
+        self.assertIsNotNone(adapters.get("kiro")._runner)
+
+    def test_skipping_kiro_cli_reads_the_files_only(self):
+        from unittest import mock
+        calls = []
+        sessions = self.tmp / "sessions"
+        write_jsonl(sessions / "ffff6666.jsonl", [{"kind": "Prompt", "data": {"content": [{"kind": "text", "data": "hi"}]}}])
+        (sessions / "ffff6666.json").write_text(json.dumps({"session_id": "ffff6666", "cwd": "/p", "title": "hi",
+                                                            "updated_at": "2026-10-01T00:00:00Z"}))
+        with mock.patch.object(kiro_module, "_run_kiro_list", side_effect=lambda: calls.append(1) or "[]"):
+            a = KiroAdapter(self.tmp / "none.sqlite3", sessions, use_kiro_cli=False)
+            self.assertEqual([s.id for s in a.list_sessions()], ["ffff6666"])
+        self.assertEqual((calls, a.listing_source), ([], "files"))
 
 
 class ReleaseTests(unittest.TestCase):

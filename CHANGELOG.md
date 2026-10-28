@@ -3,6 +3,23 @@
 All notable changes to baton. Versions follow semantic versioning: while the version is 0.x, a minor bump (0.2.0)
 adds features and a patch bump (0.2.1) fixes bugs.
 
+## Unreleased
+
+### Added
+- `--latest` on `move`: take the newest session in this directory (or in any directory with `--all`) without the picker.
+- `--version`.
+- `--no-kiro-cli` on `list` and `move`, and the `BATON_NO_KIRO_CLI=1` variable: skip Kiro's own 2 to 4 second listing and
+  read Kiro's files only.
+- A warning when a kept handoff file is inside a git repository that does not ignore `.baton/`, with the one-line fix.
+
+### Changed
+- Handoff files never overwrite an earlier one: a repeat move writes `...-2`, `...-3`, and the printed launch command names
+  the new file.
+- The launch prompt only tells the target to check the repo with git when the folder is a git repository.
+- Text a harness injected is now recognised by shape (a message made only of snake_case tagged blocks such as
+  `<recommended_plugins>…</recommended_plugins>`), not only by a fixed list of prefixes. This fixes Codex sessions whose title
+  and brief started with such a block. A message that mixes a block with the person's own words is kept.
+
 ## 0.2.0 - 2026-10-27
 
 ### Added

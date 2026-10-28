@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
 
-from . import adapters
+from . import __version__, adapters
 from .adapters.base import AmbiguousSession
-from .deliver import apply_plan, plan_move
+from .deliver import GIT_IGNORE_ADVICE, apply_plan, handoff_not_ignored, plan_move
 from .summarize import FULL_MAX_CHARS
+
+
+NO_KIRO_CLI_HELP = ("do not ask kiro-cli for its session list (it takes a few seconds): read Kiro's files only. "
+                    "Same as BATON_NO_KIRO_CLI=1")
 
 
 def unique_prefixes(ids: list[str], start: int = 12) -> dict[str, str]:
@@ -44,8 +49,14 @@ def _hint_hidden(adapter) -> None:
         print(f"note: {n} subagent session(s) hidden by --no-subagents", file=sys.stderr)
 
 
+def _source(a):
+    """The source adapter, honouring --no-subagents and --no-kiro-cli (or BATON_NO_KIRO_CLI=1 in the environment)."""
+    skip_kiro_cli = a.no_kiro_cli or os.environ.get("BATON_NO_KIRO_CLI", "") not in ("", "0")
+    return adapters.get(a.source, include_subagents=not a.no_subagents, use_kiro_cli=not skip_kiro_cli)
+
+
 def cmd_list(a) -> int:
-    shown, prefixes = _sessions(adapters.get(a.source, include_subagents=not a.no_subagents), a.all)
+    shown, prefixes = _sessions(_source(a), a.all)
     for s in shown[: a.limit]:
         print(_fmt(s, prefixes))
     return 0
@@ -64,12 +75,26 @@ def _pick(adapter, all_dirs: bool):
     return found[int(choice) - 1]
 
 
+def _latest(adapter, all_dirs: bool):
+    """The newest session in this folder (or in any folder with --all)."""
+    shown, _ = _sessions(adapter, all_dirs)
+    if not shown:
+        raise SystemExit(f"no {adapter.name} sessions found here (try --all)")
+    print(f"using the latest {adapter.name} session: {shown[0].id[:12]}  {shown[0].title[:60]}")
+    return shown[0]
+
+
 def cmd_move(a) -> int:
     if a.source == a.target:
         raise SystemExit("source and target are the same agent")
-    src, dst = adapters.get(a.source, include_subagents=not a.no_subagents), adapters.get(a.target)
+    src, dst = _source(a), adapters.get(a.target)
     try:
-        info = src.resolve(a.session) if a.session else _pick(src, a.all)
+        if a.session:
+            info = src.resolve(a.session)
+        elif a.latest:
+            info = _latest(src, a.all)
+        else:
+            info = _pick(src, a.all)
     except (KeyError, AmbiguousSession) as e:
         _hint_hidden(src)
         raise SystemExit(str(e))
@@ -88,6 +113,9 @@ def cmd_move(a) -> int:
     print(f"moving {info.agent}:{info.id[:12]} -> {dst.name} ({mode}, {len(session.messages)} messages)")
     for w in plan.warnings:
         print(f"warning: {w}", file=sys.stderr)
+    kept = not (dst.native and not a.no_native and not a.keep_files)  # otherwise the file is removed after the move
+    if kept and handoff_not_ignored(plan.handoff_file):
+        print(f"warning: {GIT_IGNORE_ADVICE}", file=sys.stderr)
     print(f"will write: {plan.handoff_file}")
     if dst.session_file:
         print(f"the file is a {dst.name} session: it is kept, because {dst.name} reads it when you run the command")
@@ -119,6 +147,7 @@ def cmd_move(a) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="baton", description="Pass one coding-agent session to another assistant.")
+    p.add_argument("--version", action="version", version=f"baton {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
     names = list(adapters.ADAPTERS)
 
@@ -128,18 +157,23 @@ def main(argv: list[str] | None = None) -> int:
     ls.add_argument("--limit", type=int, default=20)
     ls.add_argument("--no-subagents", action="store_true", help="hide sessions the agent started itself (Kiro tags them)")
     ls.add_argument("--subagents", action="store_true", help=argparse.SUPPRESS)  # old flag: now the default, kept so scripts still run
+    ls.add_argument("--no-kiro-cli", action="store_true", help=NO_KIRO_CLI_HELP)
     ls.set_defaults(fn=cmd_list)
 
     mv = sub.add_parser("move", help="move one session to another agent")
     mv.add_argument("--from", dest="source", required=True, choices=names)
     mv.add_argument("--to", dest="target", required=True, choices=names)
-    mv.add_argument("--session", help="session id or unique prefix; omit to pick interactively")
+    which = mv.add_mutually_exclusive_group()
+    which.add_argument("--session", help="session id or unique prefix; omit to pick interactively")
+    which.add_argument("--latest", action="store_true",
+                       help="use the newest session in this folder (with --all: in any folder) without asking")
     mode = mv.add_mutually_exclusive_group()
     mode.add_argument("--summarize", action="store_true", help="compact brief (default)")
     mode.add_argument("--full", action="store_true", help="whole transcript")
     mv.add_argument("--all", action="store_true", help="picker shows every directory")
     mv.add_argument("--no-subagents", action="store_true", help="hide sessions the agent started itself (Kiro tags them)")
     mv.add_argument("--subagents", action="store_true", help=argparse.SUPPRESS)  # old flag: now the default, kept so scripts still run
+    mv.add_argument("--no-kiro-cli", action="store_true", help=NO_KIRO_CLI_HELP)
     mv.add_argument("--last-n", type=int, default=8, help="messages kept verbatim in the brief")
     mv.add_argument("--max-chars", type=int, default=FULL_MAX_CHARS,
                     help=f"size cap for --full; keeps the most recent messages (default {FULL_MAX_CHARS:,})")

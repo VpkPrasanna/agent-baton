@@ -1,12 +1,13 @@
 """Turn a loaded session into files the target agent can pick up."""
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .adapters.base import Adapter, NativeError
 from .model import Message, Session
-from .summarize import FULL_MAX_CHARS, build_brief, build_transcript, native_messages
+from .summarize import FULL_MAX_CHARS, build_brief, build_transcript, has_git, native_messages
 
 
 @dataclass
@@ -22,6 +23,40 @@ class Plan:
     max_chars: int = FULL_MAX_CHARS
 
 
+def unique_path(path: Path) -> Path:
+    """The path itself, or the first of name-2, name-3, ... that is free, so a repeat move never overwrites a file.
+
+    A name like claude-aaaa1111-summarize.gemini.json becomes claude-aaaa1111-summarize-2.gemini.json.
+    """
+    if not path.exists():
+        return path
+    stem, dot, rest = path.name.partition(".")
+    n = 2
+    while (candidate := path.with_name(f"{stem}-{n}{dot}{rest}")).exists():
+        n += 1
+    return candidate
+
+
+def handoff_not_ignored(path: Path) -> bool:
+    """True when path is inside a git repository that does not ignore it: a handoff file could be committed.
+
+    False when it is ignored, when the folder is not a repository, or when git is missing or does not answer.
+    """
+    try:
+        done = subprocess.run(["git", "-C", str(path.parent.parent), "check-ignore", "-q", str(path)],
+                              capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 1  # 0 = ignored, 1 = not ignored, 128 = not a repository
+
+
+GIT_IGNORE_ADVICE = (
+    ".baton/ is inside a git repository and is not ignored. Handoff files hold conversation text (secrets are "
+    "redacted on a best-effort basis), so keep them out of commits: run  echo '.baton/' >> .git/info/exclude  in the "
+    "repository root, or add .baton/ to .gitignore"
+)
+
+
 def plan_move(session: Session, target: Adapter, mode: str, cwd: Path, last_n: int = 8,
               max_chars: int = FULL_MAX_CHARS) -> Plan:
     warnings: list[str] = []
@@ -35,7 +70,7 @@ def plan_move(session: Session, target: Adapter, mode: str, cwd: Path, last_n: i
                 "(raise --max-chars to keep more, but large handoffs may overflow the target's context)"
             )
     i = session.info
-    path = cwd / ".baton" / f"{i.agent}-{i.id[:8]}-{mode}{target.handoff_suffix}"
+    path = unique_path(cwd / ".baton" / f"{i.agent}-{i.id[:8]}-{mode}{target.handoff_suffix}")
     if target.session_file:
         # the target imports a session file itself (Gemini's --session-file): write that, not the Markdown
         msgs, omitted = _session_messages(session, mode, body, max_chars)
@@ -45,9 +80,11 @@ def plan_move(session: Session, target: Adapter, mode: str, cwd: Path, last_n: i
         content = target.render_session_file(Session(i, msgs), cwd)
         return Plan(path, content, target.import_command(str(path.relative_to(cwd))), warnings=warnings,
                     max_chars=max_chars)
+    verify = ("check the repo state with git" if has_git(str(cwd))
+              else "check the state of the files it names directly (this folder is not a git repository)")
     prompt = (
         f"You are continuing a session moved from {i.agent}. Read {path.relative_to(cwd)} first, "
-        "check the repo state with git, then continue where it left off."
+        f"{verify}, then continue where it left off."
     )
     plan = Plan(path, body, target.launch_command(prompt), warnings=warnings, max_chars=max_chars)
     return plan

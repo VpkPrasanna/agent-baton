@@ -80,7 +80,7 @@ class KiroAdapter(Adapter):
     cli = "kiro-cli chat"
 
     def __init__(self, db: Path | None = None, sessions_dir: Path | None = None, include_subagents: bool = True,
-                 runner=None):
+                 runner=None, use_kiro_cli: bool = True):
         custom_paths = db is not None or sessions_dir is not None
         self.db = db or default_db()
         self.sessions_dir = sessions_dir or default_sessions_dir()
@@ -88,7 +88,8 @@ class KiroAdapter(Adapter):
         self.hidden_subagents = 0  # set by list_sessions so the CLI can hint
         self.listing_source = "files"  # "kiro-cli" when Kiro's own listing answered
         # Kiro's own listing reflects the real home folder, so it is skipped when custom paths are given
-        self._runner = runner if runner is not None else (None if custom_paths else _run_kiro_list)
+        # use_kiro_cli=False skips Kiro's own listing, which takes a few seconds, and reads the files only
+        self._runner = runner if runner is not None else (None if custom_paths or not use_kiro_cli else _run_kiro_list)
         self._cache: list[SessionInfo] | None = None
 
     # ---- listing (metadata only) ----

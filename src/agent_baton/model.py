@@ -1,6 +1,7 @@
 """Neutral session model that every adapter reads into and writes out of."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 INJECTED_PREFIXES = (
@@ -15,9 +16,22 @@ INJECTED_PREFIXES = (
 )
 
 
+# A block like <recommended_plugins>...</recommended_plugins>: harnesses wrap what they inject in snake_case tags. The
+# underscore is the tell: HTML and XML a person pastes (<div>, <item>) rarely has one.
+_CONTEXT_BLOCK = re.compile(r"<([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?:\s[^>]*)?>.*?</\1>", re.S)
+
+
 def is_injected(text: str) -> bool:
-    """True for text the agent harness inserted, not something the user typed."""
-    return text.lstrip().startswith(INJECTED_PREFIXES)
+    """True for text the agent harness inserted, not something the user typed.
+
+    Either it starts with a known harness prefix, or it is made of nothing but snake_case tagged blocks. A message
+    that mixes a block with real words is not injected: the person's words are in it.
+    """
+    t = text.lstrip()
+    if t.startswith(INJECTED_PREFIXES):
+        return True
+    rest = _CONTEXT_BLOCK.sub("", t)
+    return rest != t and not rest.strip()
 
 
 PLACEHOLDER_PREFIXES = (

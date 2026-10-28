@@ -30,14 +30,15 @@ _EDIT_TOOLS = {
 _SENSITIVE = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*",
               "credentials*", ".netrc", ".npmrc", "*secret*")
 
-def _has_git(cwd: str) -> bool:
+def has_git(cwd: str) -> bool:
+    """True when cwd is inside a git repository."""
     p = Path(cwd)
     return any((d / ".git").exists() for d in (p, *p.parents))
 
 
 def _footer(session: Session) -> str:
     cwd = session.info.cwd
-    if cwd and Path(cwd).is_dir() and _has_git(cwd):
+    if cwd and Path(cwd).is_dir() and has_git(cwd):
         verify = ("Run `git status` / `git diff` first: earlier edits may be uncommitted and this "
                   "file is a record of the conversation, not proof the code is in the state described.")
     elif cwd and Path(cwd).is_dir():

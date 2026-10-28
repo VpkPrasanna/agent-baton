@@ -14,9 +14,9 @@ ADAPTERS: dict[str, type[Adapter]] = {
 }
 
 
-def get(name: str, include_subagents: bool = True) -> Adapter:
+def get(name: str, include_subagents: bool = True, use_kiro_cli: bool = True) -> Adapter:
     try:
         cls = ADAPTERS[name]
     except KeyError:
         raise SystemExit(f"unknown agent '{name}'. choose from: {', '.join(ADAPTERS)}")
-    return cls(include_subagents=include_subagents) if cls is KiroAdapter else cls()
+    return cls(include_subagents=include_subagents, use_kiro_cli=use_kiro_cli) if cls is KiroAdapter else cls()
