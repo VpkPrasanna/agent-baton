@@ -10,7 +10,7 @@ from contextlib import closing
 import unittest
 from pathlib import Path
 
-from agent_baton.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter, GeminiAdapter, KiroAdapter
+from agent_baton.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter, GeminiAdapter, KiroAdapter, KiroIdeAdapter
 import agent_baton.adapters.codex as codex_module
 import agent_baton.adapters.gemini as gemini_module
 import agent_baton.adapters.kiro as kiro_module
@@ -1695,6 +1695,187 @@ class QuickWinTests(unittest.TestCase):
             a = KiroAdapter(self.tmp / "none.sqlite3", sessions, use_kiro_cli=False)
             self.assertEqual([s.id for s in a.list_sessions()], ["ffff6666"])
         self.assertEqual((calls, a.listing_source), ([], "files"))
+
+
+def kiro_ide_fixtures(root: Path) -> KiroIdeAdapter:
+    """Both of the IDE's stores: the newer ~/.kiro/sessions/<hash>/sess_*/ and the older workspace-sessions folder."""
+    new = root / "sessions" / "abc123" / "sess_11111111-aaaa"
+    new.mkdir(parents=True)
+    (new / "session.json").write_text(json.dumps({
+        "id": "sess_11111111-aaaa", "title": "New Session", "workspacePaths": ["/proj"],
+        "lastModifiedAt": "2026-10-20T10:00:00.000Z"}))
+    write_jsonl(new / "messages.jsonl", [
+        {"payload": {"type": "session_start", "content": "huge system prompt"}},
+        {"payload": {"type": "user", "content": '{"method":"_kiro.dev/x"}'}},
+        {"payload": {"type": "user", "content": "<original_user_request>\nwrapped\n</original_user_request>"}},
+        {"payload": {"type": "user", "content": "add a login page"}},
+        {"payload": {"type": "assistant", "operationType": "Reasoning", "content": "private notes"}},
+        {"payload": {"type": "tool_call", "toolCallId": "t1", "toolName": "fsWrite", "args": {"toolName": "fsWrite", "path": "login.py"}}},
+        {"payload": {"type": "tool_result", "toolCallId": "t1", "content": "written"}},
+        {"payload": {"type": "assistant", "operationType": "Say", "content": "Created login.py."}},
+        {"payload": {"type": "turn_end", "stopReason": "end_turn"}},
+    ])
+    (root / "sessions" / "abc123" / "sess_orphan").mkdir()
+    (root / "sessions" / "abc123" / "sess_orphan" / "session.json").write_text("{}")  # no messages.jsonl: skipped
+    (root / "sessions" / "cli").mkdir()
+    old = root / "ws" / "L1Byb2o_"
+    old.mkdir(parents=True)
+    (old / "sessions.json").write_text(json.dumps([
+        {"sessionId": "old-2222", "title": "Fix the parser", "dateCreated": "1781510124706", "workspaceDirectory": "/proj2"},
+        {"sessionId": "gone-3333", "title": "file missing", "dateCreated": "1", "workspaceDirectory": "/proj2"}]))
+    (old / "old-2222.json").write_text(json.dumps({"history": [
+        {"message": {"role": "user", "id": "a", "content": [{"type": "text", "text": "line one"}, {"type": "text", "text": "line two"},
+                                                          {"type": "mention", "text": "ignored"}]}},
+        {"message": {"role": "assistant", "id": "b", "content": "Fixed it."}},
+        {"message": {"role": "user", "id": "c", "content": "A workflow you launched (\"x\") completed."}},
+        {"message": {"role": "assistant", "id": "d", "content": "   "}},
+    ]}))
+    return KiroIdeAdapter(root / "ws", root / "sessions")
+
+
+class KiroIdeTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.a = kiro_ide_fixtures(self.tmp)
+
+    def test_lists_both_stores_and_skips_incomplete_sessions(self):
+        listed = {s.id: s for s in self.a.list_sessions()}
+        self.assertEqual(set(listed), {"sess_11111111-aaaa", "old-2222"})
+        self.assertEqual(listed["sess_11111111-aaaa"].cwd, "/proj")
+        self.assertEqual(listed["sess_11111111-aaaa"].title, "add a login page")   # placeholder title -> first real prompt
+        self.assertEqual((listed["old-2222"].cwd, listed["old-2222"].title), ("/proj2", "Fix the parser"))
+
+    def test_loads_the_newer_store_with_tools_and_without_internal_turns(self):
+        s = self.a.load("sess_1111")
+        self.assertEqual([(m.role, m.kind, m.text) for m in s.messages if m.kind == "text"],
+                         [("user", "text", "add a login page"), ("assistant", "text", "Created login.py.")])
+        call = next(m for m in s.messages if m.kind == "tool_call")
+        self.assertEqual((call.meta["name"], call.meta["args"]), ("fsWrite", {"path": "login.py"}))
+        self.assertEqual([m.text for m in s.messages if m.kind == "tool_result"], ["written"])
+        self.assertNotIn("private notes", "".join(m.text for m in s.messages))
+
+    def test_loads_the_older_store_joining_text_blocks(self):
+        s = self.a.load("old-2")
+        self.assertEqual([(m.role, m.text) for m in s.messages], [("user", "line one\nline two"), ("assistant", "Fixed it.")])
+
+    def test_it_is_a_source_only_agent_and_the_cli_will_not_move_into_it(self):
+        from agent_baton import adapters
+        self.assertTrue(adapters.ADAPTERS["kiro-ide"].source_only)
+        self.assertFalse(any(c.source_only for n, c in adapters.ADAPTERS.items() if n != "kiro-ide"))
+        import io
+        from contextlib import redirect_stderr
+        from agent_baton import cli
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            cli.main(["move", "--from", "claude", "--to", "kiro-ide", "--latest"])
+        self.assertIn("invalid choice", err.getvalue())
+
+    def test_no_ide_folders_is_an_error_the_cli_reports(self):
+        with self.assertRaises(FileNotFoundError):
+            KiroIdeAdapter(self.tmp / "no1", self.tmp / "no2").list_sessions()
+
+    def test_a_kiro_ide_session_moves_to_claude_through_the_cli(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+        from agent_baton import cli
+        out = io.StringIO()
+        with mock.patch.object(cli.adapters, "get", side_effect=lambda n, *_, **__: self.a if n == "kiro-ide" else ClaudeCodeAdapter(self.tmp / "c")), \
+                redirect_stdout(out):
+            code = cli.main(["move", "--from", "kiro-ide", "--to", "claude", "--session", "sess_1111", "--all", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("moving kiro-ide:sess_1111", out.getvalue())
+        self.assertIn("add a login page", out.getvalue())
+
+
+class StagingTransport(ImporterTransport):
+    """An importer that lists whatever Claude session files exist under `claude_root` when detect is asked, and keeps a
+    copy of each file it is asked to import (baton removes them afterwards)."""
+
+    def __init__(self, claude_root, list_files=True, **kw):
+        super().__init__([], **kw)
+        self.claude_root, self.list_files, self.imported = claude_root, list_files, []
+
+    def send(self, obj):
+        method = obj.get("method", "")
+        if method == "externalAgentConfig/detect":
+            files = sorted(self.claude_root.glob("*/*.jsonl")) if self.list_files else []
+            self.sessions = [{"cwd": "x", "path": str(f), "title": None} for f in files]
+        elif method == "externalAgentConfig/import":
+            self.imported = [Path(x["path"]).read_text() for x in obj["params"]["migrationItems"][0]["details"]["sessions"]]
+        return super().send(obj)
+
+
+class VisibleThreadTests(unittest.TestCase):
+    """Codex shows a thread's messages only when it imported them, so baton stages a Claude file for the importer."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.claude = self.tmp / "claude"
+        self.work = self.tmp / "work"
+        self.work.mkdir()
+        from agent_baton.model import Message, Session, SessionInfo
+        self.session = Session(SessionInfo("kiro-ide", "sess_1", str(self.work), "Fix login", 0.0), [
+            Message("user", "text", "fix the login bug"), Message("assistant", "text", "done, key AKIAABCDEFGHIJKLMNOP")])
+
+    def _target(self, transports, **kw):
+        def factory():
+            t = StagingTransport(self.claude, **kw)
+            transports.append(t)
+            return AppServer(t, timeout=0.5)
+        return CodexAdapter(self.tmp / "x", server=factory, claude_root=self.claude)
+
+    def _staged_files(self):
+        return list(self.claude.rglob("*.jsonl")) if self.claude.exists() else []
+
+    def test_the_thread_is_imported_so_codex_shows_its_messages(self):
+        ts = []
+        made = self._target(ts).write_native(self.session, self.work)
+        self.assertEqual((made.session_id, made.command), (IMPORTED_THREAD, f"codex resume {IMPORTED_THREAD}"))
+        self.assertEqual(ts[0].methods(), ["initialize", "initialized", "externalAgentConfig/detect",
+                                           "externalAgentConfig/import", "thread/name/set"])
+        self.assertEqual(ts[0].sent[-1]["params"], {"threadId": IMPORTED_THREAD, "name": "Moved from kiro-ide: Fix login"})
+        staged = ts[0].imported[0]
+        self.assertIn("fix the login bug", staged)
+        self.assertNotIn("AKIAABCDEFGHIJKLMNOP", staged)       # redacted before Codex reads it
+        self.assertIn("shows the messages", made.note)
+
+    def test_the_staged_file_and_its_folder_are_removed(self):
+        self._target([]).write_native(self.session, self.work)
+        self.assertEqual(self._staged_files(), [])
+        self.assertEqual([p for p in self.claude.glob("*")], [])     # the project folder baton made is gone too
+
+    def test_an_existing_claude_folder_and_its_files_are_left_alone(self):
+        mine = self.claude / str(self.work).replace("/", "-").replace(".", "-")
+        mine.mkdir(parents=True)
+        (mine / "keep.jsonl").write_text("{}\n")
+        self._target([]).write_native(self.session, self.work)
+        self.assertEqual([p.name for p in mine.iterdir()], ["keep.jsonl"])
+
+    def test_it_falls_back_to_injection_and_says_why(self):
+        for kw in ({"outcome": "failure"}, {"list_files": False}):
+            ts = []
+            made = self._target(ts, **kw).write_native(self.session, self.work)
+            self.assertIn("thread/inject_items", [m for t in ts for m in t.methods()], kw)
+            self.assertIn("fell back to injecting the history", made.note, kw)
+            self.assertIn("transcript stays empty", made.note, kw)
+            self.assertEqual(self._staged_files(), [], kw)
+
+    def test_a_missing_project_folder_goes_straight_to_injection(self):
+        ts = []
+        made = self._target(ts).write_native(self.session, self.tmp / "gone")
+        self.assertNotIn("externalAgentConfig/detect", [m for t in ts for m in t.methods()])
+        self.assertEqual(self._staged_files(), [])
+        self.assertIn("transcript stays empty", made.note)
+
+    def test_custom_paths_never_touch_the_real_claude_folder(self):
+        self.assertIsNone(CodexAdapter(self.tmp / "x").claude_root)
+        self.assertIsNone(CodexAdapter(server=fake_server(FakeTransport())).claude_root)
+        self.assertEqual(CodexAdapter().claude_root, Path.home() / ".claude" / "projects")
 
 
 class ReleaseTests(unittest.TestCase):

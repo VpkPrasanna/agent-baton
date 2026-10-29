@@ -31,6 +31,7 @@ class Adapter:
     import_sources: frozenset = frozenset()  # source agents whose sessions this agent can import officially
     session_file = False  # True if the agent imports a session file through its own flag (Gemini's --session-file)
     handoff_suffix = ".md"  # extension of the file baton writes for this target
+    source_only = False  # True if baton can read this agent's sessions but cannot move a session into it
 
     def list_sessions(self) -> list[SessionInfo]:
         """Cheap metadata only: never parse full transcripts here."""

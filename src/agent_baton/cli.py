@@ -150,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--version", action="version", version=f"baton {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
     names = list(adapters.ADAPTERS)
+    targets = [n for n in names if not adapters.ADAPTERS[n].source_only]  # kiro-ide can be read, not moved into
 
     ls = sub.add_parser("list", help="list sessions (metadata only)")
     ls.add_argument("--from", dest="source", required=True, choices=names)
@@ -162,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
 
     mv = sub.add_parser("move", help="move one session to another agent")
     mv.add_argument("--from", dest="source", required=True, choices=names)
-    mv.add_argument("--to", dest="target", required=True, choices=names)
+    mv.add_argument("--to", dest="target", required=True, choices=targets)
     which = mv.add_mutually_exclusive_group()
     which.add_argument("--session", help="session id or unique prefix; omit to pick interactively")
     which.add_argument("--latest", action="store_true",

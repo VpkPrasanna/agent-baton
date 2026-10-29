@@ -11,7 +11,7 @@ from ..model import Message, Session, SessionInfo, is_injected, short
 from ..redact import redact
 from ..turns import flatten_turns
 from .base import Adapter, Native, NativeError
-from .claude_code import _jsonl
+from .claude_code import ClaudeCodeAdapter, _jsonl
 
 
 def _parts(content) -> str:
@@ -40,67 +40,105 @@ class CodexAdapter(Adapter):
     import_sources = frozenset({"claude"})  # sessions Codex's own importer can bring in
     import_timeout = 120.0  # seconds to wait for the importer to finish
 
-    def __init__(self, root: Path | None = None, home: Path | None = None, server=None):
+    def __init__(self, root: Path | None = None, home: Path | None = None, server=None, claude_root: Path | None = None):
+        custom = root is not None or home is not None or server is not None
         self.home = home or (root.parent if root else Path.home() / ".codex")
         self.root = root or self.home / "sessions"
         self.server = server or AppServer  # factory returning an AppServer context manager
+        # Where Codex's importer looks for Claude sessions: it only imports from Claude's real folder, so baton
+        # stages a temporary file there. Off when a test or caller supplies its own paths or server.
+        self.claude_root = claude_root if claude_root is not None else (None if custom else ClaudeCodeAdapter().root)
 
-    def import_native(self, info: SessionInfo, cwd: Path) -> Native | None:
-        """Import one Claude Code session with Codex's official importer (externalAgentConfig/detect and
-        /import), selecting only that session. Raises NativeError if Codex does not list or import it,
-        for example when the session's folder no longer exists or it was imported before.
+    def _import_session(self, srv, wanted: Path, cwd: str) -> str:
+        """Import the one Claude-format session file `wanted` with Codex's importer and return the new thread id.
+        Raises NativeError if Codex does not list or import it, for example when the session's folder no longer
+        exists or it was imported before.
         """
-        if info.agent not in self.import_sources or not info.source_path:
-            return None
-        wanted = str(Path(info.source_path).resolve())
+        wanted = Path(wanted).resolve()
         detect = {"includeHome": True, "maxSessions": 500, "maxSessionAgeDays": 3650}
-        if info.cwd and Path(info.cwd).is_dir():
-            detect["cwds"] = [info.cwd]
+        if cwd and Path(cwd).is_dir():
+            detect["cwds"] = [cwd]
         try:
-            with self.server() as srv:
-                found = srv.call("externalAgentConfig/detect", detect)
-                item, match = None, None
-                for it in found.get("items", []):
-                    if it.get("itemType") != "SESSIONS":
-                        continue
-                    hit = next((s for s in (it.get("details") or {}).get("sessions") or []
-                                if str(Path(s.get("path", "")).resolve()) == wanted), None)
-                    if hit:
-                        item, match = it, hit
-                        break
-                if not match:
-                    raise NativeError("Codex's importer did not list this session (its folder may no longer "
-                                      "exist, or it was imported before)")
-                selected = {**item, "details": {"sessions": [match]}}  # only this session, nothing else
-                started = srv.call("externalAgentConfig/import", {"migrationItems": [selected], "source": "baton"})
-                import_id = started.get("importId")
-                done = srv.wait_for("externalAgentConfig/import/completed",
-                                    lambda p: p.get("importId") == import_id, timeout=self.import_timeout)
+            found = srv.call("externalAgentConfig/detect", detect)
+            item, match = None, None
+            for it in found.get("items", []):
+                if it.get("itemType") != "SESSIONS":
+                    continue
+                hit = next((s for s in (it.get("details") or {}).get("sessions") or []
+                            if Path(s.get("path", "")).resolve() == wanted), None)
+                if hit:
+                    item, match = it, hit
+                    break
+            if not match:
+                raise NativeError("Codex's importer did not list this session (its folder may no longer "
+                                  "exist, or it was imported before)")
+            selected = {**item, "details": {"sessions": [match]}}  # only this session, nothing else
+            started = srv.call("externalAgentConfig/import", {"migrationItems": [selected], "source": "baton"})
+            import_id = started.get("importId")
+            done = srv.wait_for("externalAgentConfig/import/completed",
+                                lambda p: p.get("importId") == import_id, timeout=self.import_timeout)
         except (CodexRpcError, KeyError, TypeError) as e:
             raise NativeError(f"Codex's importer failed: {e}")
         for res in done.get("itemTypeResults", []):
             if res.get("itemType") != "SESSIONS":
                 continue
-            ok = next((s for s in res.get("successes", []) if str(Path(s.get("source", "")).resolve()) == wanted), None)
+            ok = next((s for s in res.get("successes", []) if Path(s.get("source", "")).resolve() == wanted), None)
             if ok and ok.get("target"):
-                return Native(ok["target"], f"codex resume {ok['target']}",
-                              note="imported with Codex's official importer: tool calls appear as tagged text")
+                return ok["target"]
             if res.get("failures"):
                 raise NativeError(f"Codex's importer reported a failure: {json.dumps(res['failures'])[:200]}")
         raise NativeError("Codex's importer finished without importing this session")
 
-    def write_native(self, session: Session, cwd: Path) -> Native:
-        """Create a Codex thread through `codex app-server`, the supported way in: thread/start,
-        thread/inject_items (history), thread/name/set. Writes nothing into Codex's files directly.
+    def import_native(self, info: SessionInfo, cwd: Path) -> Native | None:
+        """Import one Claude Code session with Codex's official importer, selecting only that session."""
+        if info.agent not in self.import_sources or not info.source_path:
+            return None
+        try:
+            with self.server() as srv:
+                tid = self._import_session(srv, Path(info.source_path), info.cwd)
+        except CodexRpcError as e:
+            raise NativeError(f"Codex's importer failed: {e}")
+        return Native(tid, f"codex resume {tid}", note="imported with Codex's official importer: tool calls appear as tagged text")
 
-        Codex hides threads with no user turn from its resume picker, so the thread is resumed by id.
+    def _write_visible(self, session: Session, cwd: Path, title: str) -> Native:
+        """Create a thread whose messages Codex shows, by staging the conversation as a temporary Claude session file
+        and importing it with Codex's importer. The staged file is removed again whatever happens."""
+        staged = ClaudeCodeAdapter(self.claude_root).write_native(session, cwd)
+        try:
+            with self.server() as srv:
+                tid = self._import_session(srv, staged.path, str(cwd))
+                try:
+                    srv.call("thread/name/set", {"threadId": tid, "name": title})
+                except CodexRpcError:
+                    pass  # the thread exists and shows its messages; only the title is missing
+        except CodexRpcError as e:
+            raise NativeError(f"Codex's importer failed: {e}")
+        finally:
+            staged.path.unlink(missing_ok=True)
+            try:
+                staged.path.parent.rmdir()  # only succeeds when empty
+            except OSError:
+                pass
+        return Native(tid, f"codex resume {tid}", note="Codex shows the messages: the thread was imported with Codex's importer")
+
+    def write_native(self, session: Session, cwd: Path) -> Native:
+        """Create a Codex thread. First choice: stage the conversation for Codex's own importer, which makes a thread
+        whose messages Codex shows. If that is not possible, fall back to `codex app-server` directly (thread/start,
+        thread/inject_items, thread/name/set): the model has the history but Codex shows an empty transcript, and its
+        resume picker hides the thread, so it is resumed by id. Writes nothing into Codex's files directly.
         """
+        title = short(redact(f"Moved from {session.info.agent}: {session.info.title}".strip(": ")), 80)
+        why = ""
+        if self.claude_root is not None and cwd.is_dir():
+            try:
+                return self._write_visible(session, cwd, title)
+            except NativeError as e:
+                why = f" ({e}; fell back to injecting the history)"
         items = [
             {"type": "message", "role": role,
              "content": [{"type": "input_text" if role == "user" else "output_text", "text": redact(text)}]}
             for role, text in flatten_turns(session.messages)
         ]
-        title = short(redact(f"Moved from {session.info.agent}: {session.info.title}".strip(": ")), 80)
         try:
             with self.server() as srv:
                 tid = srv.call("thread/start", {"cwd": str(cwd), "ephemeral": False})["thread"]["id"]
@@ -109,7 +147,8 @@ class CodexAdapter(Adapter):
         except (CodexRpcError, KeyError, TypeError) as e:
             raise NativeError(f"could not create a Codex session: {e}")
         return Native(tid, f"codex resume {tid}",
-                      note="Codex's resume picker only lists threads that have a user turn: resume by id")
+                      note="Codex's resume picker only lists threads that have a user turn, and its transcript stays empty "
+                           "until you send a message (the model still has the history): resume by id" + why)
 
     def _files(self):
         return self.root.rglob("rollout-*.jsonl")

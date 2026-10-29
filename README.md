@@ -123,12 +123,12 @@ resume it (run in /Users/me/project):
 
 | Command | Option | Meaning |
 |---|---|---|
-| `list` | `--from {kiro,claude,codex,cursor,gemini}` | Source agent (required) |
+| `list` | `--from {kiro,claude,codex,cursor,gemini,kiro-ide}` | Source agent (required) |
 | | `--all` | All directories, not just the current one |
 | | `--limit N` | Rows to show (default 20) |
 | | `--no-subagents` | Hide sessions the agent started itself. Kiro tags them, and they are shown and labelled `[subagent]` by default |
 | | `--no-kiro-cli` | Do not ask `kiro-cli` for its session list (2 to 4 seconds): read Kiro's files only. Same as setting `BATON_NO_KIRO_CLI=1` |
-| `move` | `--from`, `--to` | Source and target agent (required, must differ) |
+| `move` | `--from`, `--to` | Source and target agent (required, must differ). `kiro-ide` works for `--from` only |
 | | `--session ID` | Session id or unique prefix. Omit to pick interactively |
 | | `--latest` | Use the newest session in this directory (with `--all`, in any directory) without asking. Cannot be combined with `--session` |
 | | `--summarize` / `--full` | Compact brief (default) / capped transcript |
@@ -148,7 +148,7 @@ Handoff files are named `<agent>-<id>-<mode>`, and a repeat move gets `-2`, `-3`
 | Target | What baton creates | Resume with |
 |---|---|---|
 | **Claude Code** | A session file in `~/.claude/projects/<folder>/`, titled "Moved from kiro: …", private (mode 600) | `claude --resume <id>` |
-| **Codex** | A thread created through Codex's own API (`codex app-server --stdio`: `thread/start`, `thread/inject_items`, `thread/name/set`). For `--full` from Claude Code, Codex's own importer brings in the whole session instead (see below). Baton never writes into Codex's files or databases | `codex resume <id>` |
+| **Codex** | A thread that Codex shows with its messages: baton stages the conversation as a temporary Claude-format file and imports it with Codex's own importer (`externalAgentConfig/import`), then removes the staged file. If that is not possible, baton falls back to Codex's API (`thread/start`, `thread/inject_items`, `thread/name/set`): the model has the history, but Codex shows an empty transcript until you send a message. For `--full` from Claude Code, Codex's importer brings in the whole session instead (see below). Baton never writes into Codex's files or databases | `codex resume <id>` |
 | **Kiro CLI** | Kiro has no import format, so there is no session id. You get the handoff file in `.baton/` | `kiro-cli chat '<prompt>'` (printed) |
 | **Cursor CLI** | Cursor's chat store is an undocumented graph of content-addressed blobs, which baton does not write into, so there is no session id. You get the handoff file in `.baton/` | `cursor-agent '<prompt>'` (printed) |
 | **Gemini CLI** | A JSON session file in `.baton/`, which Gemini's own `--session-file` flag imports: Gemini then creates a new session in the current project when you run the command. Baton never writes into Gemini's own store. There is no session id until then, and the file is kept because the command reads it | `gemini --session-file <file>` (printed) |
@@ -272,8 +272,9 @@ src/agent_baton/
     claude_code.py  JSONL reader and session writer
     codex.py        rollout + SQLite reader, app-server session writer
     cursor.py       reader for Cursor CLI's blob graph (SQLite + protobuf nodes)
+    kiro_ide.py     source-only reader for the Kiro IDE's two chat stores
     gemini.py       reader that replays Gemini's JSONL records; writes the file for --session-file
-tests/test_baton.py 82 tests; the real `codex` and `kiro-cli` are blocked in every test
+tests/test_baton.py 94 tests; the real `codex` and `kiro-cli` are blocked in every test
 ```
 
 ### Adapter interface
@@ -297,7 +298,7 @@ Each agent is one class. To support another, subclass `Adapter` and implement:
 - **Secret-looking files** (`.env`, `*.pem`, `*.key`, `id_rsa*`, `credentials*`, …) are never listed.
 - **Private files.** Handoff files and Claude session files are created with mode 600.
 - **Git warning.** When a handoff file is kept inside a git repository that does not ignore `.baton/`, baton warns you and shows how to ignore it (`echo '.baton/' >> .git/info/exclude`), because the file holds conversation text. Baton never edits your `.gitignore` itself.
-- **Codex goes through its API.** Baton never edits Codex's rollout files or SQLite databases.
+- **Codex goes through its API.** Baton never edits Codex's rollout files or SQLite databases. To make a thread's messages visible, baton briefly puts a temporary session file in `~/.claude/projects/` (Codex's importer only looks there), imports it, and deletes it, and the project folder too if baton made it and it is empty. `--no-native` skips all of this.
 - **What leaves your machine.** Baton itself makes no network calls. The new session's content goes wherever that agent sends it once you use it.
 
 ## Supported moves and how well each is tested
@@ -322,6 +323,10 @@ What the labels mean:
 
 Reading was checked against real sessions for four sources: Kiro (its own listing and the files agreed on the same 12
 sessions), Claude Code, Codex (rollout files and the SQLite history) and Cursor CLI chats.
+
+### Kiro IDE (source only)
+
+`baton list --from kiro-ide --all` lists chats from the Kiro IDE, which is a different program from the Kiro CLI. Baton reads both places the IDE keeps them: `~/.kiro/sessions/<hash>/sess_*/` (newer; includes tool calls and results) and the `workspace-sessions` folder under Kiro's application data (older; user and assistant text only). Both are opened read-only. Any session moves to Claude Code, Codex, Cursor CLI, Gemini CLI or the Kiro CLI. You cannot move a session into the IDE, because it has no command that resumes one. The reader was checked against real IDE sessions on one machine (macOS); the IDE's file formats are not documented, so a future IDE version may change them. The macOS folder was checked; baton looks under `~/.config/Kiro` on Linux, which is a guess and untested. Windows is not supported.
 
 Gemini CLI was added last, so it is less tested than the rest. A real Gemini session now exists on the machine this was
 built on (a single `hello` message, with no reply), and against it:
@@ -366,7 +371,7 @@ What has been verified, and what has not:
 Known limits:
 
 - **Codex importer.** It only lists a Claude session whose folder still exists, and skips one that Codex already imported with the same content. Baton then falls back to its own session creation. It reads Claude Code sessions only, brings the whole conversation (so resuming it uses more of Codex's usage than a brief), and drops reasoning. Cursor CLI chats were not detected by it.
-- **Codex resume picker.** Codex hides threads that have no user turn from its picker, so open a baton-made thread by id. After your first message in it, the thread is listed like any other.
+- **Codex shows the messages only when the importer was used.** The normal path is the importer. The fallback (used when the project folder no longer exists, or the importer does not list or import the file) injects the history through Codex's API: the model has it, but Codex shows an empty transcript and hides the thread from its resume picker, so open it by id. After your first message the thread is listed like any other. Baton's output says which path it took. The importer only accepts sessions from Claude's real folder, so baton cannot stage the file anywhere else.
 - **Codex writer lock.** If Codex's shared background daemon has loaded a thread (for example because you opened it in the Codex app, or a program resumed it through the daemon's API), `codex exec resume <id>` can fail with "already has an active writer". A fresh baton-made thread resumed straight away with `codex exec resume` or `codex resume <id>` worked with no conflict. The lock was released on its own in the one case I watched; if it persists, close the thread in the Codex app first.
 - **Kiro target** has no import format, so there is no session id, only a handoff file and command.
 - **Kiro listing.** Baton asks Kiro for its sessions first (`kiro-cli chat --list-sessions --all-cwds --format json`, about 1.5 to 4 seconds) and reads the files too, so a session is found even if one source misses it. If `kiro-cli` is missing, fails or times out, it quietly uses the files only. Kiro has no documented, non-interactive way to export a session's content, so content always comes from the files, and a session Kiro lists but baton cannot find locally is reported clearly.

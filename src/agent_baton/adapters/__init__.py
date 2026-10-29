@@ -4,6 +4,7 @@ from .codex import CodexAdapter
 from .cursor import CursorAdapter
 from .gemini import GeminiAdapter
 from .kiro import KiroAdapter
+from .kiro_ide import KiroIdeAdapter
 
 ADAPTERS: dict[str, type[Adapter]] = {
     "kiro": KiroAdapter,
@@ -11,6 +12,7 @@ ADAPTERS: dict[str, type[Adapter]] = {
     "codex": CodexAdapter,
     "cursor": CursorAdapter,
     "gemini": GeminiAdapter,
+    "kiro-ide": KiroIdeAdapter,
 }
 
 
