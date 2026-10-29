@@ -3,6 +3,19 @@
 All notable changes to baton. Versions follow semantic versioning: while the version is 0.x, a minor bump (0.2.0)
 adds features and a patch bump (0.2.1) fixes bugs.
 
+## 0.2.2 - 2026-10-29
+
+### Added
+- **Kiro IDE as a source** (`--from kiro-ide`): reads the IDE's newer `~/.kiro/sessions/<hash>/sess_*/` chats (with tool
+  calls and results) and its older `workspace-sessions` chats, read-only. Workflow and runtime turns the IDE puts in the
+  user's side are left out. It is source only: `--to kiro-ide` is rejected, because the IDE has no way to resume a session.
+
+### Fixed
+- Codex: a thread baton made showed an empty transcript, because history added through `thread/inject_items` is
+  model-only. Baton now stages the conversation as a temporary Claude-format file in `~/.claude/projects/`, imports it
+  with Codex's importer, and removes the file, so Codex shows the messages and the model still has them. It falls back to
+  the old path (and says so) when the project folder is gone or the importer does not take the file.
+
 ## 0.2.1 - 2026-10-28
 
 ### Added
