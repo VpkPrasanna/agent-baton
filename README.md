@@ -76,6 +76,22 @@ refuses names that match an existing project once hyphens and underscores are ig
 
 ## Usage
 
+### Work from the project directory
+
+Start in the project directory that owns the session you want to move:
+
+```bash
+cd /path/to/project
+baton list --from kiro
+baton move --from kiro --to codex
+```
+
+The current directory scopes the default session search: `list`, the interactive `move` picker, and `move --latest`
+only show sessions recorded for that directory. Use `--all` to search every directory, or pass `--session ID` to select a
+known session from any directory. After selection, baton uses the session's recorded project directory (when it still
+exists) for the `.baton/` handoff, the new native session, and the printed resume command. Therefore an explicit
+`--session` can be run from elsewhere, but its context is moved into the session's original project directory.
+
 ### 1. Find the session
 
 ```bash
